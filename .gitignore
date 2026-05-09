@@ -14,3 +14,8 @@ outputs/
 */.DS_Store
 **/*.out
 Dockerfile
+.trae/
+libs/CLIP*
+libs/flash*
+libs/ocnn*
+envir*.yml
