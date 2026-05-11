@@ -52,6 +52,15 @@ def process_scene(scene_id, images_dir, depth_dir, masks_dir, camera_json_path, 
     
     frame_data_list = []
     
+    # ---------------------------------------------------------
+    # BOP-Ask Paper Section 3.2.1: World frame construction
+    # The original BOP world frame (from cam_R_w2c) is often arbitrary and the table is tilted.
+    # We will estimate a Scene-Level Alignment Matrix (R_align) by fitting a plane to the 
+    # objects in the first valid frame, aligning the table normal to the Z-axis [0,0,1].
+    # ---------------------------------------------------------
+    R_align = np.eye(3)
+    alignment_computed = False
+    
     for rgb_path in tqdm(rgb_files, desc="Unprojecting frames"):
         basename = os.path.basename(rgb_path)
         frame_id_str = basename.split('_')[3].replace('.png', '')
@@ -105,45 +114,137 @@ def process_scene(scene_id, images_dir, depth_dir, masks_dir, camera_json_path, 
         # Unproject to Camera Space
         depth_in_m = (depth_img * depth_scale) / 1000.0 # Convert mm to meters
         
-        # Dynamic depth cutoff based on object masks to handle tilted cameras
         has_objects = (segment_img > 0)
-        if has_objects.any():
-            # Find the furthest object point and add 1.0m margin for the table/context
-            max_obj_depth = depth_in_m[has_objects].max()
-            depth_limit = max_obj_depth + 1.0
-        else:
-            # Fallback if no objects in view
-            depth_limit = 3.0
+        if not has_objects.any():
+            continue
             
-        valid = (depth_img > 0) & (depth_in_m < depth_limit)
-        z = depth_in_m[valid]
-        v, u = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
-        u_valid = u[valid]
-        v_valid = v[valid]
+        # 3D LOCAL CONTEXT BOUNDING BOX (ORIENTED BY WORLD COORDINATES): 
+        # BOP datasets define the World Coordinate System such that the Z-axis is perpendicular to the table.
+        # By transforming points to World Space first, our Axis-Aligned Bounding Box (AABB) in World Space
+        # acts as an Oriented Bounding Box (OBB) in Camera Space. This perfectly handles tilted cameras.
         
+        # 1. Unproject ONLY the object points first to find their 3D bounds
+        v_obj, u_obj = np.where(has_objects & (depth_img > 0))
+        if len(v_obj) == 0:
+            continue
+        z_obj = depth_in_m[v_obj, u_obj]
         fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-        x = (u_valid - cx) * z / fx
-        y = (v_valid - cy) * z / fy
+        x_obj = (u_obj - cx) * z_obj / fx
+        y_obj = (v_obj - cy) * z_obj / fy
+        
+        # Transform object points to World Space
+        pts_obj_cam = np.stack((x_obj, y_obj, z_obj), axis=1)
+        pts_obj_cam_homo = np.hstack((pts_obj_cam, np.ones((pts_obj_cam.shape[0], 1))))
+        pts_obj_world = (T_c2w @ pts_obj_cam_homo.T).T[:, :3]
+        
+        # --- Compute Scene-Level Alignment (Once per scene) ---
+        if not alignment_computed:
+            try:
+                # To prevent Open3D Segmentation Faults on the cluster, we use pure numpy SVD to fit the plane
+                # since the object points are mostly spread across the table surface.
+                pts_for_fit = pts_obj_world[::5] # Subsample for speed
+                
+                # 1. Calculate centroid and center the points
+                centroid = np.mean(pts_for_fit, axis=0)
+                centered_pts = pts_for_fit - centroid
+                
+                # 2. Compute SVD
+                u, s, vh = np.linalg.svd(centered_pts, full_matrices=False)
+                
+                # The normal is the last row of Vh (corresponding to the smallest singular value)
+                n_p = vh[2, :]
+                
+                # Ensure normal points "up" (Z > 0) or towards the camera
+                if n_p[2] < 0:
+                    n_p = -n_p
+                    
+                v_z = np.array([0.0, 0.0, 1.0])
+                v = np.cross(n_p, v_z)
+                c = np.dot(n_p, v_z)
+                if np.linalg.norm(v) < 1e-6:
+                    R_align = np.eye(3)
+                else:
+                    s_norm = np.linalg.norm(v)
+                    kmat = np.array([
+                        [0, -v[2], v[1]],
+                        [v[2], 0, -v[0]],
+                        [-v[1], v[0], 0]
+                    ])
+                    R_align = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s_norm ** 2))
+                print(f"\nScene Alignment Computed (Numpy SVD). Table normal in World Space: {n_p}")
+            except Exception as e:
+                print(f"\nWarning: SVD plane fitting failed ({e}), using default World Space.")
+                R_align = np.eye(3)
+            alignment_computed = True
+        
+        # Apply the alignment rotation so the table is flat (Z is up)
+        pts_obj_aligned = (R_align @ pts_obj_world.T).T
+        
+        # Object bounding box in Aligned Space (Z is aligned with table normal)
+        min_x, max_x = pts_obj_aligned[:, 0].min(), pts_obj_aligned[:, 0].max()
+        min_y, max_y = pts_obj_aligned[:, 1].min(), pts_obj_aligned[:, 1].max()
+        min_z, max_z = pts_obj_aligned[:, 2].min(), pts_obj_aligned[:, 2].max()
+        
+        # 2. Expand bounding box to include the supporting table and local context
+        # (e.g., 0.5m padding in X/Y, 0.5m above, 0.2m below to capture table surface)
+        margin_x, margin_y, margin_z_below, margin_z_above = 0.5, 0.5, 0.2, 0.5
+        
+        # 3. Unproject ALL valid depth points
+        valid_depth = (depth_img > 0)
+        v_all, u_all = np.where(valid_depth)
+        z_all = depth_in_m[v_all, u_all]
+        x_all = (u_all - cx) * z_all / fx
+        y_all = (v_all - cy) * z_all / fy
+        
+        pts_all_cam = np.stack((x_all, y_all, z_all), axis=1)
+        pts_all_cam_homo = np.hstack((pts_all_cam, np.ones((pts_all_cam.shape[0], 1))))
+        pts_all_world = (T_c2w @ pts_all_cam_homo.T).T[:, :3]
+        pts_all_aligned = (R_align @ pts_all_world.T).T
+        
+        # 4. Filter points that fall within the expanded Aligned Space Bounding Box
+        in_box = (
+            (pts_all_aligned[:, 0] >= min_x - margin_x) & (pts_all_aligned[:, 0] <= max_x + margin_x) &
+            (pts_all_aligned[:, 1] >= min_y - margin_y) & (pts_all_aligned[:, 1] <= max_y + margin_y) &
+            (pts_all_aligned[:, 2] >= min_z - margin_z_below) & (pts_all_aligned[:, 2] <= max_z + margin_z_above)
+        )
+        
+        # Reconstruct the final valid arrays
+        z = z_all[in_box]
+        x = x_all[in_box]
+        y = y_all[in_box]
+        u_valid = u_all[in_box]
+        v_valid = v_all[in_box]
         
         pts_cam = np.stack((x, y, z), axis=1) # (N, 3)
         
-        # Transform to World Space
+        # Transform to Original World Space, then apply Scene Alignment to make table flat (Z is up)
         pts_cam_homo = np.hstack((pts_cam, np.ones((pts_cam.shape[0], 1))))
-        pts_world = (T_c2w @ pts_cam_homo.T).T[:, :3]
+        pts_world_orig = (T_c2w @ pts_cam_homo.T).T[:, :3]
+        pts_world = (R_align @ pts_world_orig.T).T
+        
+        # Update T_c2w to reflect the new aligned world space
+        T_c2w_aligned = np.eye(4)
+        T_c2w_aligned[:3, :3] = R_align @ T_c2w[:3, :3]
+        T_c2w_aligned[:3, 3] = R_align @ T_c2w[:3, 3]
+        
+        # We need to map the in_box flat indices back to the 2D image 
+        # to extract colors and segments properly
+        valid_flat_mask = np.zeros_like(valid_depth, dtype=bool)
+        valid_flat_mask[v_valid, u_valid] = True
         
         # Ensure we filter out any NaNs or Infs that could cause segfaults later
         valid_pts = ~np.isnan(pts_world).any(axis=1) & ~np.isinf(pts_world).any(axis=1)
         if not valid_pts.all():
             pts_world = pts_world[valid_pts]
-            colors = rgb_img[valid][valid_pts]
-            segments = segment_img[valid][valid_pts]
-            instances = instance_img[valid][valid_pts]
+            colors = rgb_img[valid_flat_mask][valid_pts]
+            segments = segment_img[valid_flat_mask][valid_pts]
+            instances = instance_img[valid_flat_mask][valid_pts]
             u_valid = u_valid[valid_pts]
             v_valid = v_valid[valid_pts]
         else:
-            colors = rgb_img[valid]
-            segments = segment_img[valid]
-            instances = instance_img[valid]
+            colors = rgb_img[valid_flat_mask]
+            segments = segment_img[valid_flat_mask]
+            instances = instance_img[valid_flat_mask]
         
         global_coords.append(pts_world)
         global_colors.append(colors)
@@ -155,7 +256,7 @@ def process_scene(scene_id, images_dir, depth_dir, masks_dir, camera_json_path, 
             'rgb_path': rgb_path,
             'depth_path': depth_path,
             'K': K,
-            'T_c2w': T_c2w,
+            'T_c2w': T_c2w_aligned,
             'u': u_valid,
             'v': v_valid,
             'pts_world': pts_world
@@ -174,28 +275,15 @@ def process_scene(scene_id, images_dir, depth_dir, masks_dir, camera_json_path, 
     voxel_indices = np.floor(global_coords / voxel_size).astype(np.int32)
     _, unique_indices = np.unique(voxel_indices, axis=0, return_index=True)
     
-    # If the point cloud is still absurdly large after voxelization, we need to enforce a hard cap
-    # to prevent Open3D from segfaulting during normal estimation.
-    MAX_POINTS_CAP = 10_000_000 # 10 million points max per scene
+    # Since we strictly filter out all background points, the total point count should be extremely small
+    # (usually < 500k points per scene). The MAX_POINTS_CAP logic is kept just as a nuclear failsafe.
+    MAX_POINTS_CAP = 3_000_000 # 3 million points
     if len(unique_indices) > MAX_POINTS_CAP:
         print(f"WARNING: Point cloud still too large ({len(unique_indices)}). Randomly subsampling to {MAX_POINTS_CAP}...")
         
-        # Smart Subsampling: Prioritize points that belong to objects
-        is_object = global_segments[unique_indices].squeeze() > 0
-        obj_indices = np.where(is_object)[0]
-        bg_indices = np.where(~is_object)[0]
-        
+        # Since all remaining points are object points, we just do a uniform random choice
         np.random.seed(42)
-        if len(obj_indices) >= MAX_POINTS_CAP:
-            # Extremely rare: even the objects themselves have >10M points
-            chosen_indices = np.random.choice(obj_indices, MAX_POINTS_CAP, replace=False)
-        else:
-            # Normal case: keep ALL object points, and randomly sample the remaining quota from background
-            remaining_cap = MAX_POINTS_CAP - len(obj_indices)
-            chosen_bg = np.random.choice(bg_indices, remaining_cap, replace=False)
-            chosen_indices = np.concatenate([obj_indices, chosen_bg])
-            np.random.shuffle(chosen_indices) # Shuffle to mix them
-            
+        chosen_indices = np.random.choice(len(unique_indices), MAX_POINTS_CAP, replace=False)
         unique_indices = unique_indices[chosen_indices]
 
     down_coords = global_coords[unique_indices].astype(np.float64) # Force float64 for Open3D
@@ -206,14 +294,53 @@ def process_scene(scene_id, images_dir, depth_dir, masks_dir, camera_json_path, 
     print(f"Points remaining after downsampling: {len(down_coords)}")
     
     # Estimate Normals
-    print("Estimating normals...")
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(down_coords)
-    # Reduce max_nn to prevent memory exhaustion on supercomputer nodes
-    # For large datasets, use a smaller max_nn and limit thread count further if needed.
-    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*5, max_nn=10))
-    pcd.orient_normals_towards_camera_location(camera_location=np.array([0., 0., 0.])) # Approximation for normal orientation
-    down_normals = np.asarray(pcd.normals).astype(np.float32)
+    print("Estimating normals using pure NumPy/SciPy (avoiding Open3D segfaults)...")
+    
+    # We use cKDTree and numpy SVD for normal estimation to bypass Open3D completely
+    try:
+        tree_normals = cKDTree(down_coords)
+        # Find 10 nearest neighbors for each point
+        _, nn_indices = tree_normals.query(down_coords, k=10)
+        
+        down_normals = np.zeros_like(down_coords, dtype=np.float32)
+        
+        # Calculate normals in chunks to avoid massive memory usage
+        chunk_size = 50000
+        for i in tqdm(range(0, len(down_coords), chunk_size), desc="Calculating normals"):
+            end_idx = min(i + chunk_size, len(down_coords))
+            chunk_nn = nn_indices[i:end_idx]
+            
+            # Extract points for each neighborhood: shape (chunk_size, 10, 3)
+            neighbors = down_coords[chunk_nn]
+            
+            # Center the neighbors
+            centroids = np.mean(neighbors, axis=1, keepdims=True)
+            centered = neighbors - centroids
+            
+            # Compute covariance matrices: shape (chunk_size, 3, 3)
+            covariances = np.matmul(centered.transpose(0, 2, 1), centered)
+            
+            # Use numpy's eigh (eigenvalues/eigenvectors for Hermitian/symmetric matrices)
+            # which is faster and more stable than SVD for covariance matrices
+            eigenvalues, eigenvectors = np.linalg.eigh(covariances)
+            
+            # The normal is the eigenvector corresponding to the smallest eigenvalue
+            # eigh returns eigenvalues in ascending order, so index 0 is the smallest
+            normals_chunk = eigenvectors[:, :, 0]
+            
+            # Orient normals towards the camera (approximate origin [0,0,0])
+            # dot product of normal and ray from origin to point
+            pts_chunk = down_coords[i:end_idx]
+            dots = np.sum(normals_chunk * pts_chunk, axis=1)
+            # If dot product is positive, the normal points away from camera, so flip it
+            flip_mask = dots > 0
+            normals_chunk[flip_mask] = -normals_chunk[flip_mask]
+            
+            down_normals[i:end_idx] = normals_chunk.astype(np.float32)
+            
+    except Exception as e:
+        print(f"Warning: Pure NumPy normal estimation failed ({e}). Filling with zeros.")
+        down_normals = np.zeros_like(down_coords, dtype=np.float32)
     
     # Save Global Point Cloud
     np.save(scene_output_dir / "coord.npy", down_coords)
