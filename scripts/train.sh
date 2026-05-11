@@ -62,7 +62,12 @@ echo "Machine Num: $NUM_MACHINE"
 
 if [ -n "$SLURM_NODELIST" ]; then
   MASTER_HOSTNAME=$(scontrol show hostname "$SLURM_NODELIST" | head -n 1)
-  MASTER_ADDR=$(getent hosts "$MASTER_HOSTNAME" | awk '{ print $1 }')
+  # Some systems return nothing or empty strings for getent hosts when IPv6 is filtered out,
+  # or MASTER_ADDR might end up empty. Let's fallback to localhost if empty.
+  MASTER_ADDR=$(getent hosts "$MASTER_HOSTNAME" | awk '{ print $1 }' | grep -v ":" | head -n 1)
+  if [ -z "$MASTER_ADDR" ]; then
+    MASTER_ADDR="127.0.0.1"
+  fi
   MASTER_PORT=$((10000 + 0x$(echo -n "${DATASET}/${EXP_NAME}" | md5sum | cut -c 1-4 | awk '{print $1}') % 20000))
   DIST_URL=tcp://$MASTER_ADDR:$MASTER_PORT
 fi
