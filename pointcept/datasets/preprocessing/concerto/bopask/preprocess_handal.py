@@ -103,8 +103,20 @@ def process_scene(scene_id, images_dir, depth_dir, masks_dir, camera_json_path, 
                 continue
                 
         # Unproject to Camera Space
-        valid = (depth_img > 0)
-        z = (depth_img[valid] * depth_scale) / 1000.0 # Convert mm to meters
+        depth_in_m = (depth_img * depth_scale) / 1000.0 # Convert mm to meters
+        
+        # Dynamic depth cutoff based on object masks to handle tilted cameras
+        has_objects = (segment_img > 0)
+        if has_objects.any():
+            # Find the furthest object point and add 1.0m margin for the table/context
+            max_obj_depth = depth_in_m[has_objects].max()
+            depth_limit = max_obj_depth + 1.0
+        else:
+            # Fallback if no objects in view
+            depth_limit = 3.0
+            
+        valid = (depth_img > 0) & (depth_in_m < depth_limit)
+        z = depth_in_m[valid]
         v, u = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
         u_valid = u[valid]
         v_valid = v[valid]
@@ -119,9 +131,19 @@ def process_scene(scene_id, images_dir, depth_dir, masks_dir, camera_json_path, 
         pts_cam_homo = np.hstack((pts_cam, np.ones((pts_cam.shape[0], 1))))
         pts_world = (T_c2w @ pts_cam_homo.T).T[:, :3]
         
-        colors = rgb_img[valid]
-        segments = segment_img[valid]
-        instances = instance_img[valid]
+        # Ensure we filter out any NaNs or Infs that could cause segfaults later
+        valid_pts = ~np.isnan(pts_world).any(axis=1) & ~np.isinf(pts_world).any(axis=1)
+        if not valid_pts.all():
+            pts_world = pts_world[valid_pts]
+            colors = rgb_img[valid][valid_pts]
+            segments = segment_img[valid][valid_pts]
+            instances = instance_img[valid][valid_pts]
+            u_valid = u_valid[valid_pts]
+            v_valid = v_valid[valid_pts]
+        else:
+            colors = rgb_img[valid]
+            segments = segment_img[valid]
+            instances = instance_img[valid]
         
         global_coords.append(pts_world)
         global_colors.append(colors)
@@ -152,16 +174,44 @@ def process_scene(scene_id, images_dir, depth_dir, masks_dir, camera_json_path, 
     voxel_indices = np.floor(global_coords / voxel_size).astype(np.int32)
     _, unique_indices = np.unique(voxel_indices, axis=0, return_index=True)
     
-    down_coords = global_coords[unique_indices]
+    # If the point cloud is still absurdly large after voxelization, we need to enforce a hard cap
+    # to prevent Open3D from segfaulting during normal estimation.
+    MAX_POINTS_CAP = 10_000_000 # 10 million points max per scene
+    if len(unique_indices) > MAX_POINTS_CAP:
+        print(f"WARNING: Point cloud still too large ({len(unique_indices)}). Randomly subsampling to {MAX_POINTS_CAP}...")
+        
+        # Smart Subsampling: Prioritize points that belong to objects
+        is_object = global_segments[unique_indices].squeeze() > 0
+        obj_indices = np.where(is_object)[0]
+        bg_indices = np.where(~is_object)[0]
+        
+        np.random.seed(42)
+        if len(obj_indices) >= MAX_POINTS_CAP:
+            # Extremely rare: even the objects themselves have >10M points
+            chosen_indices = np.random.choice(obj_indices, MAX_POINTS_CAP, replace=False)
+        else:
+            # Normal case: keep ALL object points, and randomly sample the remaining quota from background
+            remaining_cap = MAX_POINTS_CAP - len(obj_indices)
+            chosen_bg = np.random.choice(bg_indices, remaining_cap, replace=False)
+            chosen_indices = np.concatenate([obj_indices, chosen_bg])
+            np.random.shuffle(chosen_indices) # Shuffle to mix them
+            
+        unique_indices = unique_indices[chosen_indices]
+
+    down_coords = global_coords[unique_indices].astype(np.float64) # Force float64 for Open3D
     down_colors = global_colors[unique_indices]
     down_segments = global_segments[unique_indices]
     down_instances = global_instances[unique_indices]
+    
+    print(f"Points remaining after downsampling: {len(down_coords)}")
     
     # Estimate Normals
     print("Estimating normals...")
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(down_coords)
-    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*5, max_nn=30))
+    # Reduce max_nn to prevent memory exhaustion on supercomputer nodes
+    # For large datasets, use a smaller max_nn and limit thread count further if needed.
+    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*5, max_nn=10))
     pcd.orient_normals_towards_camera_location(camera_location=np.array([0., 0., 0.])) # Approximation for normal orientation
     down_normals = np.asarray(pcd.normals).astype(np.float32)
     

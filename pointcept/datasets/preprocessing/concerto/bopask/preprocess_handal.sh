@@ -28,8 +28,20 @@ echo "RGB Gap: $rgb_gap"
 echo "Voxel Size: $voxel_size"
 echo "-----------------------------------------------"
 
+# Step 0: Clean up previous generated data
+echo "[0/3] Cleaning up previous data in output root..."
+if [ -d "$output_root" ]; then
+    rm -rf "$output_root/scene_"*
+    rm -rf "$output_root/images"
+    rm -rf "$output_root/splits"
+    echo "Cleanup complete."
+else
+    echo "No previous data found. Skipping cleanup."
+fi
+
 # Step 1: Run the main 2D to 3D global unprojection and KDTree correspondence matching
-echo "[1/2] Running global unprojection and correspondence matching..."
+echo "[1/3] Running global unprojection and correspondence matching..."
+export OMP_NUM_THREADS=2  # Limit OpenMP threads further
 python pointcept/datasets/preprocessing/concerto/bopask/preprocess_handal.py \
     --src_dir "$src_dir" \
     --bop_val_dir "$bop_val_dir" \
