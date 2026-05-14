@@ -16,7 +16,7 @@ def generate_splits(dataset_path):
         print(f"No frame directories found in {dataset_path}. Run preprocess_bopask.py first.")
         return
         
-    print(f"Found {len(frame_dirs)} frames.")
+    print(f"Found {len(frame_dirs)} valid preprocessed frames.")
     
     # Shuffle and split 90/10
     np.random.seed(42)
@@ -27,18 +27,33 @@ def generate_splits(dataset_path):
     
     def create_split_json(frames, out_file):
         split_dict = {}
+        # Scene statistics tracker
+        scene_counts = {}
+        
         for i, frame_path in enumerate(frames):
+            # Extract scene_id for statistics
+            # frame_path looks like: .../scene_000001/scene_000001_frame_000001
+            scene_id = os.path.basename(os.path.dirname(frame_path))
+            scene_counts[scene_id] = scene_counts.get(scene_id, 0) + 1
+            
             # Convert to relative path from dataset_root
             rel_path = os.path.relpath(frame_path, dataset_path)
+            
             # Use relative path as key and pointclouds value
-            # The dataset class typically joins data_root with this relative path
+            # Note: We must ensure it starts with "data/pointcept/bopask/" to match S3DIS logic 
+            # if Pointcept expects absolute-like dataset paths, but usually relative is fine.
+            # We'll use the raw relative path since HandalDataset will join it with data_root.
             split_dict[f"item_{i}"] = {
                 "pointclouds": rel_path
             }
         
         with open(os.path.join(split_path, out_file), "w") as f:
             json.dump(split_dict, f, indent=4)
-        print(f"Generated {out_file} with {len(frames)} items.")
+        
+        print(f"\n[{out_file}] Total Samples: {len(frames)}")
+        print(f"[{out_file}] Scene Distribution:")
+        for sid, count in sorted(scene_counts.items()):
+            print(f"  - {sid}: {count} frames")
 
     create_split_json(train_frames, "train.json")
     create_split_json(val_frames, "val.json")
@@ -48,7 +63,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_root",
         type=str,
-        default="/gpfs/work/mec/yiwenwang18/Pointcept/data/pointcept/bopask",
+        required=True,
         help="Path to the preprocessed bopask dataset",
     )
     config = parser.parse_args()

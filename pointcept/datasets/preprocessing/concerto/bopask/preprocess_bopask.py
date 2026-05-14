@@ -164,7 +164,7 @@ def get_point_cloud_from_rgbd(rgb_img, depth_img, masks_dict, K, R_w2c, t_w2c, d
     # Any unannotated point (segment == 0) that is significantly higher than the table
     # (e.g., > 1.5 cm) is a physical obstacle (like a box or first-aid kit).
     unannotated_mask = (segment_valid == 0)
-    obstacle_z_threshold = min_z + 0.015  # 1.5 cm above the lowest object point
+    obstacle_z_threshold = min_z + 0.01  # 1.0 cm above the lowest object point
     is_obstacle = unannotated_mask & (pts_valid_aligned[:, 2] > obstacle_z_threshold)
     
     segment_valid[is_obstacle] = 41
@@ -316,8 +316,8 @@ def parse_bopask(src_dir, out_dir, bop_original_dir, split_type, debug=False):
             
             np.save(os.path.join(sample_dir, 'coord.npy'), coord.astype(np.float32))
             np.save(os.path.join(sample_dir, 'color.npy'), color.astype(np.uint8))
-            np.save(os.path.join(sample_dir, 'segment.npy'), segment.astype(np.int32))
-            np.save(os.path.join(sample_dir, 'instance.npy'), instance.astype(np.int32))
+            np.save(os.path.join(sample_dir, 'segment.npy'), segment.astype(np.int16))
+            np.save(os.path.join(sample_dir, 'instance.npy'), instance.astype(np.int16))
             # *CRITICAL*: Save camera ray into normal.npy so Pointcept automatically loads it
             np.save(os.path.join(sample_dir, 'normal.npy'), ray.astype(np.float32))
 
@@ -345,9 +345,17 @@ def parse_bopask(src_dir, out_dir, bop_original_dir, split_type, debug=False):
                 print(f" - Saved Semantic visualization PLY to {sem_ply_path}")
                 sys.exit(0)
             else:
-                # Save 2x downsampled sparse PLY for every view in non-debug mode
+                # Save 2x downsampled sparse PLY for every view in non-debug mode for robust logging/debugging
                 ply_path = os.path.join(vis_dir, f"{name_stem}_sparse.ply")
                 save_ply_manual(coord[::2], color[::2], ply_path)
+                
+                ray_ply_path = os.path.join(vis_dir, f"{name_stem}_sparse_ray.ply")
+                ray_colors = ((ray[::2] + 1.0) * 127.5).astype(np.uint8)
+                save_ply_manual(coord[::2], ray_colors, ray_ply_path)
+                
+                sem_ply_path = os.path.join(vis_dir, f"{name_stem}_sparse_semantic.ply")
+                sem_colors = generate_semantic_colors(segment[::2])
+                save_ply_manual(coord[::2], sem_colors, sem_ply_path)
 
             # Also generate a pseudo text mapping file if using PPT open-vocabulary
             # Handal classes are just target_X, so we use dummy "obj_X" for now.
@@ -356,9 +364,9 @@ def parse_bopask(src_dir, out_dir, bop_original_dir, split_type, debug=False):
             
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--src_dir", type=str, required=True, help="Path to BOPAsk images/depths (e.g., .../bopask-data/handal-qa-train)")
-    parser.add_argument("--out_dir", type=str, required=True, help="Path to output Pointcept data (e.g., .../Pointcept/data/pointcept/bopask)")
-    parser.add_argument("--bop_original_dir", type=str, required=True, help="Path to original BOP dataset containing camera intrinsics/extrinsics (e.g., .../bop_original/handal)")
+    parser.add_argument("--src_dir", type=str, required=True, help="Path to BOPAsk images/depths (e.g., .../bopask-data/handal-qa-train)")  # BOPAsk训练集来自BOP挑战赛验证集的十个场景
+    parser.add_argument("--out_dir", type=str, required=True, help="Path to output Pointcept data (e.g., .../Pointcept/data/concerto/bopask)")
+    parser.add_argument("--bop_original_dir", type=str, required=True, help="Path to original BOP dataset containing camera intrinsics/extrinsics (e.g., .../bop_original/handal)")  # BOP挑战赛原始数据
     parser.add_argument("--split_type", type=str, default="val", choices=["val", "test", "train"], help="Which split in bop_original_dir contains the scene_camera.json for these images (usually 'val' or 'test')")
     parser.add_argument("--debug", action="store_true", help="Run in debug mode: process 1 image, save PLY, and exit.")
     args = parser.parse_args()
