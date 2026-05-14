@@ -14,7 +14,7 @@ enable_amp = True
 # model settings
 model = dict(
     type="DefaultLORASegmentorV2",
-    num_classes=50,
+    num_classes=42,
     backbone_out_channels=1728,
     use_lora=True,
     lora_r=8,
@@ -72,12 +72,12 @@ param_dicts = [dict(keyword="block", lr=0.0002)]
 
 # dataset settings
 dataset_type = "HandalDataset"
-data_root = "data/pointcept/bopask"
+data_root = "data/concerto/bopask"
 
 data = dict(
-    num_classes=50,
+    num_classes=42,
     ignore_index=-1,
-    names=[f"obj_{i}" for i in range(50)],
+    names=[f"obj_{i}" for i in range(42)],
     train=dict(
         type=dataset_type,
         split="train",

@@ -18,7 +18,9 @@ CLASS_LABELS_BOPASK = [
     # 31-34: Strainers
     "strainer", "strainer", "strainer", "strainer",
     # 35-40: Whisks
-    "whisk", "whisk", "whisk", "whisk", "whisk", "whisk"
+    "whisk", "whisk", "whisk", "whisk", "whisk", "whisk",
+    # 41: Unknown Obstacles
+    "obstacle"
 ]
 
 # misc custom setting
@@ -58,7 +60,7 @@ train = dict(
 # model settings
 model = dict(
     type="PPT-v1m3",
-    num_classes=41,
+    num_classes=42,
     backbone=dict(
         type="PT-v3m2",
         in_channels=9,
@@ -102,8 +104,8 @@ model = dict(
         CLASS_LABELS_BOPASK,
     ),
     valid_index=(
-        tuple(range(1, 41)),
-    ),  # 去掉background, 提升表征纯度
+        tuple(range(1, 42)),
+    ),  # 去掉background, 包含目标物体与障碍物, 提升表征纯度
     backbone_mode=False,
 )
 
@@ -123,7 +125,7 @@ param_dicts = [dict(keyword="block", lr=0.0002)]
 
 # dataset settings
 dataset_type = "HandalDataset"
-data_root = "data/pointcept/bopask"
+data_root = "data/concerto/bopask"
 
 data = dict(
     num_classes=41,

@@ -73,17 +73,35 @@ def get_point_cloud_from_rgbd(rgb_img, depth_img, masks_dict, K, R_w2c, t_w2c, d
     pts_cam_obj = np.stack([x_obj, y_obj, z_obj], axis=1)
     pts_world_obj = (pts_cam_obj - t_w2c) @ R_inv.T
     
-    # 3. Compute Scene Alignment (Z-up based on objects)
-    pts_for_fit = pts_world_obj[::max(1, len(pts_world_obj)//1000)] # Subsample for speed
-    centroid = np.mean(pts_for_fit, axis=0)
-    centered_pts = pts_for_fit - centroid
+    # 3. Compute Scene Alignment (Z-up based on Table Surface)
+    # Instead of fitting a plane to the objects (which causes tilt if objects are tall/asymmetric),
+    # we find the dominant plane (table) in the local neighborhood using robust RANSAC.
+    centroid = np.mean(pts_world_obj, axis=0)
     
-    # SVD to find plane normal
-    try:
-        u, s, vh = np.linalg.svd(centered_pts, full_matrices=False)
-        n_p = vh[2, :]
-    except:
-        n_p = np.array([0.0, 0.0, 1.0])
+    # Gather ALL points within 0.5m of the object centroid (this captures the table)
+    dists = np.linalg.norm(pts_world_all - centroid, axis=1)
+    local_pts = pts_world_all[dists < 0.5]
+    if len(local_pts) < 100:
+        local_pts = pts_world_obj
+        
+    def ransac_normal(pts, iters=1000, thresh=0.005):
+        if len(pts) < 3: return np.array([0.0, 0.0, 1.0])
+        idx = np.random.randint(0, len(pts), (iters, 3))
+        p1, p2, p3 = pts[idx[:, 0]], pts[idx[:, 1]], pts[idx[:, 2]]
+        n = np.cross(p2 - p1, p3 - p1)
+        norm = np.linalg.norm(n, axis=1, keepdims=True)
+        valid = norm[:, 0] > 1e-6
+        n, p1 = n[valid] / norm[valid], p1[valid]
+        
+        best_cnt, best_n = -1, np.array([0.0, 0.0, 1.0])
+        eval_pts = pts[::max(1, len(pts)//5000)] # Subsample for fast evaluation
+        for i in range(len(n)):
+            cnt = np.sum(np.abs(np.dot(eval_pts - p1[i], n[i])) < thresh)
+            if cnt > best_cnt:
+                best_cnt, best_n = cnt, n[i]
+        return best_n
+
+    n_p = ransac_normal(local_pts)
         
     # Orient normal towards camera
     C_world = -R_inv @ t_w2c
@@ -140,7 +158,73 @@ def get_point_cloud_from_rgbd(rgb_img, depth_img, masks_dict, K, R_w2c, t_w2c, d
     segment_valid = segment_full[v_all[in_box], u_all[in_box]]
     instance_valid = instance_full[v_all[in_box], u_all[in_box]]
     
+    # 8. Heuristic Separation of "Table Surface" (0) and "Unknown Obstacles" (41)
+    # Since pts_valid_aligned has Z-axis strictly pointing up from the table,
+    # the table surface is roughly at Z = min_z.
+    # Any unannotated point (segment == 0) that is significantly higher than the table
+    # (e.g., > 1.5 cm) is a physical obstacle (like a box or first-aid kit).
+    unannotated_mask = (segment_valid == 0)
+    obstacle_z_threshold = min_z + 0.015  # 1.5 cm above the lowest object point
+    is_obstacle = unannotated_mask & (pts_valid_aligned[:, 2] > obstacle_z_threshold)
+    
+    segment_valid[is_obstacle] = 41
+    instance_valid[is_obstacle] = 41
+    
     return pts_valid_aligned, color_valid, segment_valid, instance_valid, ray_aligned
+
+def generate_semantic_colors(segment_array):
+    """
+    Generate distinct colors for semantic visualization based on BOPAsk classes.
+    0: background (light gray)
+    1-9: hammer (red)
+    10-14: spatula (green)
+    15-19: measuring spoon (blue)
+    20-26: power drill (yellow)
+    27-30: ladle (cyan)
+    31-34: strainer (magenta)
+    35-40: whisk (orange)
+    41: obstacle (purple)
+    """
+    colors = np.zeros((len(segment_array), 3), dtype=np.uint8)
+    
+    # Define color palette (R, G, B)
+    palette = {
+        "background": [200, 200, 200],  # Light Gray
+        "hammer": [255, 0, 0],          # Red
+        "spatula": [0, 255, 0],         # Green
+        "measuring_spoon": [0, 0, 255], # Blue
+        "power_drill": [255, 255, 0],   # Yellow
+        "ladle": [0, 255, 255],         # Cyan
+        "strainer": [255, 0, 255],      # Magenta
+        "whisk": [255, 165, 0],         # Orange
+        "obstacle": [128, 0, 128]       # Purple
+    }
+    
+    # Map class IDs to categories
+    for i in range(len(segment_array)):
+        cid = segment_array[i]
+        if cid == 0:
+            colors[i] = palette["background"]
+        elif 1 <= cid <= 9:
+            colors[i] = palette["hammer"]
+        elif 10 <= cid <= 14:
+            colors[i] = palette["spatula"]
+        elif 15 <= cid <= 19:
+            colors[i] = palette["measuring_spoon"]
+        elif 20 <= cid <= 26:
+            colors[i] = palette["power_drill"]
+        elif 27 <= cid <= 30:
+            colors[i] = palette["ladle"]
+        elif 31 <= cid <= 34:
+            colors[i] = palette["strainer"]
+        elif 35 <= cid <= 40:
+            colors[i] = palette["whisk"]
+        elif cid == 41:
+            colors[i] = palette["obstacle"]
+        else:
+            colors[i] = [0, 0, 0] # Fallback black
+            
+    return colors
 
 def parse_bopask(src_dir, out_dir, bop_original_dir, split_type, debug=False):
     os.makedirs(out_dir, exist_ok=True)
@@ -249,10 +333,16 @@ def parse_bopask(src_dir, out_dir, bop_original_dir, split_type, debug=False):
                 ray_colors = ((ray + 1.0) * 127.5).astype(np.uint8)
                 save_ply_manual(coord, ray_colors, ray_ply_path)
                 
+                # Visualize Semantic Segmentation based on PPT categories
+                sem_ply_path = os.path.join(vis_dir, f"{name_stem}_debug_semantic.ply")
+                sem_colors = generate_semantic_colors(segment)
+                save_ply_manual(coord, sem_colors, sem_ply_path)
+                
                 print(f"\n[DEBUG MODE] Processed one image: {name_stem}")
                 print(f" - Saved numpy arrays to {sample_dir}")
-                print(f" - Saved PLY point cloud to {ply_path}")
+                print(f" - Saved RGB PLY point cloud to {ply_path}")
                 print(f" - Saved Ray visualization PLY to {ray_ply_path}")
+                print(f" - Saved Semantic visualization PLY to {sem_ply_path}")
                 sys.exit(0)
             else:
                 # Save 2x downsampled sparse PLY for every view in non-debug mode
