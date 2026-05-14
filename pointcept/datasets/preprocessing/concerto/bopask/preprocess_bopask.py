@@ -9,19 +9,17 @@ from tqdm import tqdm
 import argparse
 
 def save_ply_manual(pts, colors, filepath):
-    with open(filepath, "w") as f:
-        f.write("ply\n")
-        f.write("format ascii 1.0\n")
-        f.write(f"element vertex {len(pts)}\n")
-        f.write("property float x\n")
-        f.write("property float y\n")
-        f.write("property float z\n")
-        f.write("property uchar red\n")
-        f.write("property uchar green\n")
-        f.write("property uchar blue\n")
-        f.write("end_header\n")
-        for i in range(len(pts)):
-            f.write(f"{pts[i,0]:.6f} {pts[i,1]:.6f} {pts[i,2]:.6f} {int(colors[i,0])} {int(colors[i,1])} {int(colors[i,2])}\n")
+    with open(filepath, "wb") as f:
+        header = f"ply\nformat binary_little_endian 1.0\nelement vertex {len(pts)}\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
+        f.write(header.encode('ascii'))
+        data = np.empty(len(pts), dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('r', '<u1'), ('g', '<u1'), ('b', '<u1')])
+        data['x'] = pts[:, 0]
+        data['y'] = pts[:, 1]
+        data['z'] = pts[:, 2]
+        data['r'] = colors[:, 0]
+        data['g'] = colors[:, 1]
+        data['b'] = colors[:, 2]
+        f.write(data.tobytes())
 
 def get_point_cloud_from_rgbd(rgb_img, depth_img, masks_dict, K, R_w2c, t_w2c, depth_scale=1000.0):
     H, W = depth_img.shape
@@ -91,15 +89,18 @@ def get_point_cloud_from_rgbd(rgb_img, depth_img, masks_dict, K, R_w2c, t_w2c, d
         n = np.cross(p2 - p1, p3 - p1)
         norm = np.linalg.norm(n, axis=1, keepdims=True)
         valid = norm[:, 0] > 1e-6
+        if not np.any(valid): return np.array([0.0, 0.0, 1.0])
         n, p1 = n[valid] / norm[valid], p1[valid]
         
-        best_cnt, best_n = -1, np.array([0.0, 0.0, 1.0])
         eval_pts = pts[::max(1, len(pts)//5000)] # Subsample for fast evaluation
-        for i in range(len(n)):
-            cnt = np.sum(np.abs(np.dot(eval_pts - p1[i], n[i])) < thresh)
-            if cnt > best_cnt:
-                best_cnt, best_n = cnt, n[i]
-        return best_n
+        
+        # Vectorized distance computation to replace the slow for-loop
+        d = -np.sum(n * p1, axis=1) # (K,)
+        dists = np.abs(eval_pts @ n.T + d) # (N, K)
+        inliers_count = np.sum(dists < thresh, axis=0) # (K,)
+        best_idx = np.argmax(inliers_count)
+        
+        return n[best_idx]
 
     n_p = ransac_normal(local_pts)
         
@@ -187,42 +188,16 @@ def generate_semantic_colors(segment_array):
     """
     colors = np.zeros((len(segment_array), 3), dtype=np.uint8)
     
-    # Define color palette (R, G, B)
-    palette = {
-        "background": [200, 200, 200],  # Light Gray
-        "hammer": [255, 0, 0],          # Red
-        "spatula": [0, 255, 0],         # Green
-        "measuring_spoon": [0, 0, 255], # Blue
-        "power_drill": [255, 255, 0],   # Yellow
-        "ladle": [0, 255, 255],         # Cyan
-        "strainer": [255, 0, 255],      # Magenta
-        "whisk": [255, 165, 0],         # Orange
-        "obstacle": [128, 0, 128]       # Purple
-    }
-    
-    # Map class IDs to categories
-    for i in range(len(segment_array)):
-        cid = segment_array[i]
-        if cid == 0:
-            colors[i] = palette["background"]
-        elif 1 <= cid <= 9:
-            colors[i] = palette["hammer"]
-        elif 10 <= cid <= 14:
-            colors[i] = palette["spatula"]
-        elif 15 <= cid <= 19:
-            colors[i] = palette["measuring_spoon"]
-        elif 20 <= cid <= 26:
-            colors[i] = palette["power_drill"]
-        elif 27 <= cid <= 30:
-            colors[i] = palette["ladle"]
-        elif 31 <= cid <= 34:
-            colors[i] = palette["strainer"]
-        elif 35 <= cid <= 40:
-            colors[i] = palette["whisk"]
-        elif cid == 41:
-            colors[i] = palette["obstacle"]
-        else:
-            colors[i] = [0, 0, 0] # Fallback black
+    # Map class IDs to categories using fast numpy boolean indexing
+    colors[segment_array == 0] = [200, 200, 200]
+    colors[(segment_array >= 1) & (segment_array <= 9)] = [255, 0, 0]
+    colors[(segment_array >= 10) & (segment_array <= 14)] = [0, 255, 0]
+    colors[(segment_array >= 15) & (segment_array <= 19)] = [0, 0, 255]
+    colors[(segment_array >= 20) & (segment_array <= 26)] = [255, 255, 0]
+    colors[(segment_array >= 27) & (segment_array <= 30)] = [0, 255, 255]
+    colors[(segment_array >= 31) & (segment_array <= 34)] = [255, 0, 255]
+    colors[(segment_array >= 35) & (segment_array <= 40)] = [255, 165, 0]
+    colors[segment_array == 41] = [128, 0, 128]
             
     return colors
 
@@ -233,6 +208,8 @@ def parse_bopask(src_dir, out_dir, bop_original_dir, split_type, debug=False):
     import re
     valid_pattern = re.compile(r'scene_\d+_frame_\d+\.png$')
     images = [img for img in images if valid_pattern.match(os.path.basename(img))]
+    # CRITICAL: Sort images so processing order is deterministic for resume capability
+    images = sorted(images)
     print(f"Found {len(images)} valid raw images to process in {src_dir}.")
     
     # Group by scene
@@ -244,12 +221,17 @@ def parse_bopask(src_dir, out_dir, bop_original_dir, split_type, debug=False):
             scene_dict[scene_id] = []
         scene_dict[scene_id].append(img_path)
         
-    # We want to process ONLY scene_000001, frame 000001 to debug the projection issue
+    # We want to process ONLY scene_000001, frame 000001 and frame 000002 to debug the projection issue
     if debug:
-        print("DEBUG: Restricting to scene_000001, frame_000001 only!")
+        print("DEBUG: scene_000001 frame_000001 for vis")
         scene_dict = {'000001': [p for p in scene_dict.get('000001', []) if 'frame_000001.png' in p]}
         
-    for scene_id, img_list in tqdm(scene_dict.items(), desc="Processing scenes"):
+    # Sort scenes dictionary by keys to ensure deterministic processing order
+    scene_dict = dict(sorted(scene_dict.items()))
+    
+    pbar = tqdm(scene_dict.items(), desc="Processing scenes")
+    for scene_id, img_list in pbar:
+        pbar.set_postfix({'scene': scene_id})
         # BOPAsk images are derived from original BOP scenes
         # Use user-specified split_type (e.g., 'val' or 'test') to locate the camera json
         cam_json_path = os.path.join(bop_original_dir, split_type, scene_id, 'scene_camera.json')
