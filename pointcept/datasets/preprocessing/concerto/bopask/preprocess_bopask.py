@@ -269,6 +269,12 @@ def parse_bopask(src_dir, out_dir, bop_original_dir, split_type, debug=False):
             name_stem = basename.replace('.png', '')
             frame_id_str = str(int(name_stem.split('_')[3]))
             
+            # Check for existing processed data to support resuming
+            sample_dir = os.path.join(scene_out_dir, name_stem)
+            expected_files = ['coord.npy', 'color.npy', 'segment.npy', 'instance.npy', 'normal.npy']
+            if not debug and all(os.path.exists(os.path.join(sample_dir, f)) for f in expected_files):
+                continue
+            
             if frame_id_str not in cam_data:
                 continue
                 
