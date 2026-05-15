@@ -1078,6 +1078,20 @@ class CropBoundary(object):
 
 
 @TRANSFORMS.register_module()
+class MapLabel(object):
+    def __init__(self, mapping_dict):
+        self.mapping_dict = mapping_dict
+
+    def __call__(self, data_dict):
+        if "segment" in data_dict:
+            segment = data_dict["segment"]
+            new_segment = np.copy(segment)
+            for old_label, new_label in self.mapping_dict.items():
+                new_segment[segment == old_label] = new_label
+            data_dict["segment"] = new_segment
+        return data_dict
+
+@TRANSFORMS.register_module()
 class ContrastiveViewsGenerator(object):
     def __init__(
         self,

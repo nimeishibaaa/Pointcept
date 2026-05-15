@@ -4,7 +4,7 @@ _base_ = ["../_base_/default_runtime.py"]
 enable_wandb = False
 
 CLASS_LABELS_BOPASK = [
-    "background",
+    "obstacle",
     # 1-9: Hammers
     "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer",
     # 10-14: Spatulas / Spoons
@@ -18,9 +18,7 @@ CLASS_LABELS_BOPASK = [
     # 31-34: Strainers
     "strainer", "strainer", "strainer", "strainer",
     # 35-40: Whisks
-    "whisk", "whisk", "whisk", "whisk", "whisk", "whisk",
-    # 41: Unknown Obstacles
-    "obstacle"
+    "whisk", "whisk", "whisk", "whisk", "whisk", "whisk"
 ]
 # BOPAsk/Handal object classes (example placeholders, update with real names if available)
 # 手动构建的 HANDAL 类别文本 (根据 BOP 2024 论文图示)
@@ -28,7 +26,7 @@ CLASS_LABELS_BOPASK = [
 
 
 # misc custom setting
-batch_size = 8  # bs: total bs in all gpus
+batch_size = 4  # bs: total bs in all gpus (reduced from 8 to avoid OOM on 2 GPUs during gradient accumulation or uneven splits)
 num_worker = 8
 mix_prob = 0.8
 clip_grad = 3.0
@@ -82,7 +80,7 @@ model = dict(
     conditions=("BOPAsk",),
     template="[x]",
     clip_model="ViT-B/16",
-    class_names=[CLASS_LABELS_BOPASK[1:]],  # 去掉background, 包含目标物体与障碍物, 提升表征纯度
+    class_names=[CLASS_LABELS_BOPASK],  # 全部参与loss计算 (41个类: 0=obstacle, 1-40=objects)
     backbone_mode=False,
 )
 
@@ -117,6 +115,7 @@ data = dict(
                 data_root=data_root,
                 transform=[
                     dict(type="CenterShift", apply_z=True),
+                    dict(type="MapLabel", mapping_dict={41: 0}),
             dict(type="RandomDropout", dropout_ratio=0.1, dropout_application_ratio=0.2),
             dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
             dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="x", p=0.5),
@@ -158,6 +157,7 @@ data = dict(
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
+            dict(type="MapLabel", mapping_dict={41: 0}),
             dict(type="Copy", keys_dict={"segment": "origin_segment"}),
             dict(
                 type="GridSample",

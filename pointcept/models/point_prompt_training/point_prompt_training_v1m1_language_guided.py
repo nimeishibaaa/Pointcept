@@ -50,7 +50,7 @@ class PointPromptTraining(nn.Module):
     ):
         super().__init__()
         assert len(conditions) == len(valid_index)
-        assert backbone.type in ["SpUNet-v1m3", "PT-v2m3", "PT-v3m1"]
+        assert backbone.type in ["SpUNet-v1m3", "PT-v2m3", "PT-v3m1", "PT-v3m2"]
         self.backbone = MODELS.build(backbone)
         self.criteria = build_criteria(criteria)
         self.conditions = conditions
