@@ -4,7 +4,7 @@ _base_ = ["../_base_/default_runtime.py"]
 enable_wandb = False
 
 # misc custom setting
-batch_size = 8  # bs: total bs in all gpus (2 GPUs x 4)
+batch_size = 2  # bs: total bs in all gpus (1 per GPU)
 num_worker = 8  # total workers
 mix_prob = 0.8
 clip_grad = 3.0
@@ -14,7 +14,7 @@ enable_amp = True
 # model settings
 model = dict(
     type="DefaultLORASegmentorV2",
-    num_classes=42,
+    num_classes=41,
     backbone_out_channels=1728,
     use_lora=True,
     lora_r=8,
@@ -22,7 +22,7 @@ model = dict(
     lora_dropout=0.1,
     keywords="module.student.backbone",
     replacements="module.backbone",
-    backbone_path="exp/concerto/pretrain-concerto-v1m1-2-large-video.pth",
+    backbone_path="exp/concerto/pretrained_model/pretrain-concerto-v1m1-2-large-video.pth",
     backbone=dict(
         type="PT-v3m2",
         in_channels=9,
@@ -50,15 +50,15 @@ model = dict(
         freeze_encoder=True,
     ),
     criteria=[
-        dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
-        dict(type="LovaszLoss", mode="multiclass", loss_weight=1.0, ignore_index=-1),
+        dict(type="CrossEntropyLoss", loss_weight=0.1, ignore_index=-1),
+        dict(type="LovaszLoss", mode="multiclass", loss_weight=2.0, ignore_index=-1),
     ],
     freeze_backbone=False,
 )
 
 # scheduler settings
-epoch = 3000
-eval_epoch = 300
+epoch = 100
+eval_epoch = 100
 optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.02)
 scheduler = dict(
     type="OneCycleLR",
@@ -75,15 +75,16 @@ dataset_type = "HandalDataset"
 data_root = "data/concerto/bopask"
 
 data = dict(
-    num_classes=42,
+    num_classes=41,
     ignore_index=-1,
-    names=[f"obj_{i}" for i in range(42)],
+    names=[f"obj_{i}" for i in range(41)],
     train=dict(
         type=dataset_type,
         split="train",
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
+            dict(type="MapLabel", mapping_dict={41: 0}),
             dict(type="RandomDropout", dropout_ratio=0.1, dropout_application_ratio=0.2),
             dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
             dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="x", p=0.5),
@@ -114,6 +115,7 @@ data = dict(
             ),
         ],
         test_mode=False,
+        loop=1,
     ),
     val=dict(
         type=dataset_type,
@@ -121,6 +123,7 @@ data = dict(
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
+            dict(type="MapLabel", mapping_dict={41: 0}),
             dict(
                 type="GridSample",
                 grid_size=0.002,

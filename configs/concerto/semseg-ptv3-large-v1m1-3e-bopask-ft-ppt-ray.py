@@ -72,8 +72,8 @@ model = dict(
         freeze_encoder=True,
     ),
     criteria=[
-        dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
-        dict(type="LovaszLoss", mode="multiclass", loss_weight=1.0, ignore_index=-1),
+        dict(type="CrossEntropyLoss", loss_weight=0.1, ignore_index=-1),
+        dict(type="LovaszLoss", mode="multiclass", loss_weight=2.0, ignore_index=-1),
     ],
     freeze_backbone=False,
     backbone_out_channels=64,

@@ -3,26 +3,45 @@ _base_ = ["../_base_/default_runtime.py"]
 # disable wandb
 enable_wandb = False
 
+# Removed "obstacle" (index 0). Now classes 0-39 correspond to the 40 objects.
+CLASS_LABELS_BOPASK = [
+    # 1-9: Hammers
+    "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer",
+    # 10-14: Spatulas / Spoons
+    "spatula", "spatula", "spatula", "spatula", "spatula",
+    # 15-19: Measuring spoons
+    "measuring spoon", "measuring spoon", "measuring spoon", "measuring spoon", "measuring spoon",
+    # 20-26: Power drills
+    "power drill", "power drill", "power drill", "power drill", "power drill", "power drill", "power drill",
+    # 27-30: Ladles
+    "ladle", "ladle", "ladle", "ladle",
+    # 31-34: Strainers
+    "strainer", "strainer", "strainer", "strainer",
+    # 35-40: Whisks
+    "whisk", "whisk", "whisk", "whisk", "whisk", "whisk"
+]
+
+# Generate mapping_dict: 0 (original obstacle) -> -1, 41 (original unknown) -> -1, 1-40 -> 0-39
+mapping_dict = {0: -1, 41: -1}
+for i in range(1, 41):
+    mapping_dict[i] = i - 1
+
 # misc custom setting
-batch_size = 8  # bs: total bs in all gpus (2 GPUs x 4)
-num_worker = 8  # total workers
+batch_size = 4  # bs: total bs in all gpus (reduced from 8 to avoid OOM on 2 GPUs during gradient accumulation or uneven splits)
+num_worker = 8
 mix_prob = 0.8
 clip_grad = 3.0
 empty_cache = False
 enable_amp = True
 
+# trainer
+train = dict(
+    type="DefaultTrainer",  # 多数据集训练时要改"MultiDatasetTrainer"
+)
+
 # model settings
 model = dict(
-    type="DefaultLORASegmentorV2",
-    num_classes=50,  # Handal object IDs can go up to ~40+
-    backbone_out_channels=1728,
-    use_lora=True,
-    lora_r=8,
-    lora_alpha=16,
-    lora_dropout=0.1,
-    keywords="module.student.backbone",
-    replacements="module.backbone",
-    backbone_path="exp/concerto/pretrain-concerto-v1m1-2-large-video.pth",
+    type="PPT-v1m3",
     backbone=dict(
         type="PT-v3m2",
         in_channels=9,
@@ -32,6 +51,10 @@ model = dict(
         enc_channels=(64, 128, 256, 512, 768),
         enc_num_head=(4, 8, 16, 32, 48),
         enc_patch_size=(1024, 1024, 1024, 1024, 1024),
+        dec_depths=(3, 3, 3, 3),
+        dec_channels=(64, 96, 192, 384),
+        dec_num_head=(4, 6, 12, 24),
+        dec_patch_size=(1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
         qk_scale=None,
@@ -44,9 +67,9 @@ model = dict(
         enable_flash=False,
         upcast_attention=False,
         upcast_softmax=False,
-        enc_mode=True,
         traceable=True,
         mask_token=False,
+        enc_mode=False,
         freeze_encoder=True,
     ),
     criteria=[
@@ -54,11 +77,17 @@ model = dict(
         dict(type="LovaszLoss", mode="multiclass", loss_weight=1.0, ignore_index=-1),
     ],
     freeze_backbone=False,
+    backbone_out_channels=64,
+    conditions=("BOPAsk",),
+    template="[x]",
+    clip_model="ViT-B/16",
+    class_names=[CLASS_LABELS_BOPASK],  # 现在只有40个类别 (全是object)
+    backbone_mode=False,
 )
 
 # scheduler settings
-epoch = 3000
-eval_epoch = 300  # evaluates 10 times in total (every 10 epochs)
+epoch = 100
+eval_epoch = 100
 optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.02)
 scheduler = dict(
     type="OneCycleLR",
@@ -72,32 +101,33 @@ param_dicts = [dict(keyword="block", lr=0.0002)]
 
 # dataset settings
 dataset_type = "HandalDataset"
-data_root = "data/pointcept/handal"
+data_root = "data/concerto/bopask"
 
 data = dict(
-    num_classes=50,
+    num_classes=40, # 改为40类
     ignore_index=-1,
-    names=[f"obj_{i}" for i in range(50)],
+    names=CLASS_LABELS_BOPASK,
     train=dict(
         type=dataset_type,
         split="train",
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
-            dict(type="RandomDropout", dropout_ratio=0.2, dropout_application_ratio=0.2),
+            dict(type="MapLabel", mapping_dict=mapping_dict), # 使用生成的mapping_dict
+            dict(type="RandomDropout", dropout_ratio=0.1, dropout_application_ratio=0.2),
             dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
-            dict(type="RandomRotate", angle=[-1 / 64, 1 / 64], axis="x", p=0.5),
-            dict(type="RandomRotate", angle=[-1 / 64, 1 / 64], axis="y", p=0.5),
-            dict(type="RandomScale", scale=[0.9, 1.1]),
-            dict(type="RandomFlip", p=0.5),
-            dict(type="RandomJitter", sigma=0.001, clip=0.005), # scaled down for small objects
-            dict(type="ElasticDistortion", distortion_params=[[0.05, 0.1], [0.2, 0.4]]), # scaled down
+            dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="x", p=0.5),
+            dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="y", p=0.5),
+            dict(type="RandomScale", scale=[0.95, 1.05]),
+            # dict(type="RandomFlip", p=0.5), # 禁用翻转以保护相机射线和物体手性
+            dict(type="RandomJitter", sigma=0.0005, clip=0.0015),
+            # dict(type="ElasticDistortion", distortion_params=[[0.05, 0.1], [0.2, 0.4]]),
             dict(type="ChromaticAutoContrast", p=0.2, blend_factor=None),
             dict(type="ChromaticTranslation", p=0.95, ratio=0.05),
             dict(type="ChromaticJitter", p=0.95, std=0.05),
             dict(
                 type="GridSample",
-                grid_size=0.005,  # 5mm grid size for desktop objects
+                grid_size=0.002,
                 hash_type="fnv",
                 mode="train",
                 return_grid_coord=True,
@@ -105,14 +135,16 @@ data = dict(
             dict(type="SphereCrop", point_max=204800, mode="random"),
             dict(type="CenterShift", apply_z=False),
             dict(type="NormalizeColor"),
+            dict(type="Update", keys_dict={"condition": "BOPAsk"}),
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment"),
+                keys=("coord", "grid_coord", "segment", "condition"),
                 feat_keys=("coord", "color", "normal"),
             ),
         ],
         test_mode=False,
+        loop=1,
     ),
     val=dict(
         type=dataset_type,
@@ -120,19 +152,24 @@ data = dict(
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
+            dict(type="MapLabel", mapping_dict=mapping_dict), # 使用生成的mapping_dict
+            dict(type="Copy", keys_dict={"segment": "origin_segment"}),
             dict(
                 type="GridSample",
-                grid_size=0.005,
+                grid_size=0.002,
                 hash_type="fnv",
                 mode="train",
                 return_grid_coord=True,
+                return_inverse=True,
             ),
             dict(type="CenterShift", apply_z=False),
             dict(type="NormalizeColor"),
+            # KEEP NORMAL
+            dict(type="Update", keys_dict={"condition": "BOPAsk"}),
             dict(type="ToTensor"),
             dict(
                 type="Collect",
-                keys=("coord", "grid_coord", "segment"),
+                keys=("coord", "grid_coord", "segment", "origin_segment", "condition", "inverse"),
                 feat_keys=("coord", "color", "normal"),
             ),
         ],
@@ -145,24 +182,25 @@ data = dict(
         transform=[
             dict(type="CenterShift", apply_z=True),
             dict(type="NormalizeColor"),
+            # KEEP NORMAL
         ],
         test_mode=True,
         test_cfg=dict(
             voxelize=dict(
                 type="GridSample",
-                grid_size=0.005,
+                grid_size=0.002,
                 hash_type="fnv",
                 mode="test",
-                keys=("coord", "color", "normal"),
                 return_grid_coord=True,
             ),
             crop=None,
             post_transform=[
                 dict(type="CenterShift", apply_z=False),
+                dict(type="Update", keys_dict={"condition": "BOPAsk"}),
                 dict(type="ToTensor"),
                 dict(
                     type="Collect",
-                    keys=("coord", "grid_coord", "index"),
+                    keys=("coord", "grid_coord", "index", "condition"),
                     feat_keys=("coord", "color", "normal"),
                 ),
             ],
