@@ -35,7 +35,7 @@ enable_amp = True
 
 # trainer
 train = dict(
-    type="MultiDatasetTrainer",
+    type="DefaultTrainer",  # 多数据集训练时要改"MultiDatasetTrainer"
 )
 
 # model settings
@@ -85,8 +85,8 @@ model = dict(
 )
 
 # scheduler settings
-epoch = 3000
-eval_epoch = 300
+epoch = 100
+eval_epoch = 100
 optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.02)
 scheduler = dict(
     type="OneCycleLR",
@@ -107,15 +107,12 @@ data = dict(
     ignore_index=-1,
     names=CLASS_LABELS_BOPASK,
     train=dict(
-        type="ConcatDataset",
-        datasets=[
-            dict(
-                type=dataset_type,
-                split="train",
-                data_root=data_root,
-                transform=[
-                    dict(type="CenterShift", apply_z=True),
-                    dict(type="MapLabel", mapping_dict={41: 0}),
+        type=dataset_type,
+        split="train",
+        data_root=data_root,
+        transform=[
+            dict(type="CenterShift", apply_z=True),
+            dict(type="MapLabel", mapping_dict={41: 0}),
             dict(type="RandomDropout", dropout_ratio=0.1, dropout_application_ratio=0.2),
             dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
             dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="x", p=0.5),
@@ -130,26 +127,23 @@ data = dict(
             dict(
                 type="GridSample",
                 grid_size=0.002,
-                        hash_type="fnv",
-                        mode="train",
-                        return_grid_coord=True,
-                    ),
-                    dict(type="SphereCrop", point_max=204800, mode="random"),
-                    dict(type="CenterShift", apply_z=False),
-                    dict(type="NormalizeColor"),
-                    # KEEP NORMAL: Camera Ray Encoding is preserved!
-                    dict(type="Update", keys_dict={"condition": "BOPAsk"}),
-                    dict(type="ToTensor"),
-                    dict(
-                        type="Collect",
-                        keys=("coord", "grid_coord", "segment", "condition"),
-                        feat_keys=("coord", "color", "normal"),
-                    ),
-                ],
-                test_mode=False,
-                loop=1,
+                hash_type="fnv",
+                mode="train",
+                return_grid_coord=True,
             ),
-        ]
+            dict(type="SphereCrop", point_max=204800, mode="random"),
+            dict(type="CenterShift", apply_z=False),
+            dict(type="NormalizeColor"),
+            dict(type="Update", keys_dict={"condition": "BOPAsk"}),
+            dict(type="ToTensor"),
+            dict(
+                type="Collect",
+                keys=("coord", "grid_coord", "segment", "condition"),
+                feat_keys=("coord", "color", "normal"),
+            ),
+        ],
+        test_mode=False,
+        loop=1,
     ),
     val=dict(
         type=dataset_type,
