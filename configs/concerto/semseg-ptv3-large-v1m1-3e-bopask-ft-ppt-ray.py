@@ -22,6 +22,10 @@ CLASS_LABELS_BOPASK = [
     # 41: Unknown Obstacles
     "obstacle"
 ]
+# BOPAsk/Handal object classes (example placeholders, update with real names if available)
+# 手动构建的 HANDAL 类别文本 (根据 BOP 2024 论文图示)
+# 索引 0 作为背景占位，索引 1-40 对应 obj_000001 到 obj_000040，索引41是全部未知物体
+
 
 # misc custom setting
 batch_size = 8  # bs: total bs in all gpus
@@ -36,31 +40,9 @@ train = dict(
     type="MultiDatasetTrainer",
 )
 
-# BOPAsk/Handal object classes (example placeholders, update with real names if available)
-# 手动构建的 HANDAL 类别文本 (根据 BOP 2024 论文图示)
-# 索引 0 作为背景占位，索引 1-40 对应 obj_000001 到 obj_000040
-# CLASS_LABELS_BOPASK = [
-#     "background",
-#     # 1-9: Hammers
-#     "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer",
-#     # 10-14: Spatulas / Spoons
-#     "spatula", "spatula", "spatula", "spatula", "spatula",
-#     # 15-19: Measuring spoons
-#     "measuring spoon", "measuring spoon", "measuring spoon", "measuring spoon", "measuring spoon",
-#     # 20-26: Power drills
-#     "power drill", "power drill", "power drill", "power drill", "power drill", "power drill", "power drill",
-#     # 27-30: Ladles
-#     "ladle", "ladle", "ladle", "ladle",
-#     # 31-34: Strainers
-#     "strainer", "strainer", "strainer", "strainer",
-#     # 35-40: Whisks
-#     "whisk", "whisk", "whisk", "whisk", "whisk", "whisk"
-# ]
-
 # model settings
 model = dict(
     type="PPT-v1m3",
-    num_classes=42,
     backbone=dict(
         type="PT-v3m2",
         in_channels=9,
@@ -100,12 +82,7 @@ model = dict(
     conditions=("BOPAsk",),
     template="[x]",
     clip_model="ViT-B/16",
-    class_name=(
-        CLASS_LABELS_BOPASK,
-    ),
-    valid_index=(
-        tuple(range(1, 42)),
-    ),  # 去掉background, 包含目标物体与障碍物, 提升表征纯度
+    class_names=[CLASS_LABELS_BOPASK[1:]],  # 去掉background, 包含目标物体与障碍物, 提升表征纯度
     backbone_mode=False,
 )
 
