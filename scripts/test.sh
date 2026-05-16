@@ -55,9 +55,18 @@ echo "Machine Num: $NUM_MACHINE"
 
 if [ -n "$SLURM_NODELIST" ]; then
   MASTER_HOSTNAME=$(scontrol show hostname "$SLURM_NODELIST" | head -n 1)
-  MASTER_ADDR=$(getent hosts "$MASTER_HOSTNAME" | awk '{ print $1 }')
-  MASTER_PORT=$((10000 + 0x$(echo -n "${DATASET}/${EXP_NAME}" | md5sum | cut -c 1-4 | awk '{print $1}') % 20000))
+  MASTER_ADDR=$(getent hosts "$MASTER_HOSTNAME" | awk '{ print $1 }' | grep -v ":" | head -n 1)
+  if [ -z "$MASTER_ADDR" ]; then
+    MASTER_ADDR="127.0.0.1"
+  fi
+  MASTER_PORT=$((10000 + 0x$(echo -n "${DATASET}/${EXP_NAME}" | md5sum | cut -c 1-4 | awk '{print $1}') % 20000 + $RANDOM % 1000))
   DIST_URL=tcp://$MASTER_ADDR:$MASTER_PORT
+fi
+
+# Fallback auto port if it's still 'auto'
+if [ "$DIST_URL" = "auto" ]; then
+  MASTER_PORT=$((10000 + $RANDOM % 20000))
+  DIST_URL=tcp://127.0.0.1:$MASTER_PORT
 fi
 
 echo "Dist URL: $DIST_URL"
