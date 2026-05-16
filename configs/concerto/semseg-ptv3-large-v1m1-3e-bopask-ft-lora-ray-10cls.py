@@ -182,6 +182,7 @@ data = dict(
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
+            dict(type="MapLabel", mapping_dict=mapping_dict),
             dict(type="NormalizeColor"),
         ],
         test_mode=True,

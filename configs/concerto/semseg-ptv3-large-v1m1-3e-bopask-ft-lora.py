@@ -4,7 +4,7 @@ _base_ = ["../_base_/default_runtime.py"]
 enable_wandb = False
 
 # misc custom setting
-batch_size = 8  # bs: total bs in all gpus (2 GPUs x 4)
+batch_size = 4  # bs: total bs in all gpus (2 GPUs x 4)
 num_worker = 8  # total workers
 mix_prob = 0.8
 clip_grad = 3.0
@@ -142,7 +142,7 @@ data = dict(
     ),
     test=dict(
         type=dataset_type,
-        split="test",
+        split="val",
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),

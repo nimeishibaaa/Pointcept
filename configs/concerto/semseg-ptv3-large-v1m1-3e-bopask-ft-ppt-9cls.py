@@ -3,30 +3,37 @@ _base_ = ["../_base_/default_runtime.py"]
 # disable wandb
 enable_wandb = False
 
-CLASS_LABELS_BOPASK = [
-    "obstacle",
-    # 1-9: Hammers
-    "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer", "hammer",
-    # 10-14: Spatulas / Spoons
-    "spatula", "spatula", "spatula", "spatula", "spatula",
-    # 15-19: Measuring spoons
-    "measuring spoon", "measuring spoon", "measuring spoon", "measuring spoon", "measuring spoon",
-    # 20-26: Power drills
-    "power drill", "power drill", "power drill", "power drill", "power drill", "power drill", "power drill",
-    # 27-30: Ladles
-    "ladle", "ladle", "ladle", "ladle",
-    # 31-34: Strainers
-    "strainer", "strainer", "strainer", "strainer",
-    # 35-40: Whisks
-    "whisk", "whisk", "whisk", "whisk", "whisk", "whisk"
+# 9 macro categories based on the 40 items (removed spaghetti spoon)
+CLASS_LABELS_9 = [
+    "hammer",             # 1-9
+    "slotted spoon",      # 10
+    "ladle",              # 11-12
+    "measuring spoon",    # 14-19
+    "power drill",        # 20-25
+    "silicone spatula",   # 26-27
+    "turner spatula",     # 28-29
+    "strainer",           # 30-34
+    "whisk"               # 35-40
 ]
-# BOPAsk/Handal object classes (example placeholders, update with real names if available)
-# 手动构建的 HANDAL 类别文本 (根据 BOP 2024 论文图示)
-# 索引 0 作为背景占位，索引 1-40 对应 obj_000001 到 obj_000040，索引41是全部未知物体
 
+# Generate mapping_dict: 
+# 0 (obstacle) -> -1
+# 41 (unknown) -> -1
+# 13 (spaghetti spoon) -> -1 (removed)
+# Others mapped to 0-8
+mapping_dict = {0: -1, 13: -1, 41: -1}
+for i in range(1, 10): mapping_dict[i] = 0   # hammer (1-9) -> 0
+mapping_dict[10] = 1                         # slotted spoon (10) -> 1
+for i in range(11, 13): mapping_dict[i] = 2  # ladle (11-12) -> 2
+for i in range(14, 20): mapping_dict[i] = 3  # measuring spoon (14-19) -> 3
+for i in range(20, 26): mapping_dict[i] = 4  # electric drill (20-25) -> 4
+for i in range(26, 28): mapping_dict[i] = 5  # silicone spatula (26-27) -> 5
+for i in range(28, 30): mapping_dict[i] = 6  # turner spatula (28-29) -> 6
+for i in range(30, 35): mapping_dict[i] = 7  # strainer (30-34) -> 7
+for i in range(35, 41): mapping_dict[i] = 8  # whisk (35-40) -> 8
 
 # misc custom setting
-batch_size = 4  # bs: total bs in all gpus (reduced from 8 to avoid OOM on 2 GPUs during gradient accumulation or uneven splits)
+batch_size = 4  # bs: total bs in all gpus
 num_worker = 8
 mix_prob = 0.8
 clip_grad = 3.0
@@ -35,10 +42,9 @@ enable_amp = True
 
 # trainer
 train = dict(
-    type="DefaultTrainer",  # 多数据集训练时要改"MultiDatasetTrainer"
+    type="DefaultTrainer",
 )
 
-# model settings
 model = dict(
     type="PPT-v1m3",
     backbone=dict(
@@ -72,15 +78,17 @@ model = dict(
         freeze_encoder=True,
     ),
     criteria=[
-        dict(type="CrossEntropyLoss", loss_weight=0.1, ignore_index=-1),
-        dict(type="LovaszLoss", mode="multiclass", loss_weight=2.0, ignore_index=-1),
+        dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
+        dict(type="LovaszLoss", mode="multiclass", loss_weight=1.0, ignore_index=-1),
     ],
     freeze_backbone=False,
     backbone_out_channels=64,
     conditions=("BOPAsk",),
     template="[x]",
     clip_model="ViT-B/16",
-    class_names=[CLASS_LABELS_BOPASK],  # 全部参与loss计算 (41个类: 0=obstacle, 1-40=objects)
+    class_names=[
+        CLASS_LABELS_9,
+    ],
     backbone_mode=False,
 )
 
@@ -103,47 +111,53 @@ dataset_type = "HandalDataset"
 data_root = "data/concerto/bopask"
 
 data = dict(
-    num_classes=41,
+    num_classes=9,
     ignore_index=-1,
-    names=CLASS_LABELS_BOPASK,
+    names=CLASS_LABELS_9,
     train=dict(
-        type=dataset_type,
-        split="train",
-        data_root=data_root,
-        transform=[
-            dict(type="CenterShift", apply_z=True),
-            dict(type="MapLabel", mapping_dict={41: 0}),
-            dict(type="RandomDropout", dropout_ratio=0.1, dropout_application_ratio=0.2),
-            dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
-            dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="x", p=0.5),
-            dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="y", p=0.5),
-            dict(type="RandomScale", scale=[0.95, 1.05]),
-            # dict(type="RandomFlip", p=0.5), # 禁用翻转以保护相机射线和物体手性
-            dict(type="RandomJitter", sigma=0.0005, clip=0.0015),
-            # dict(type="ElasticDistortion", distortion_params=[[0.05, 0.1], [0.2, 0.4]]),
-            dict(type="ChromaticAutoContrast", p=0.2, blend_factor=None),
-            dict(type="ChromaticTranslation", p=0.95, ratio=0.05),
-            dict(type="ChromaticJitter", p=0.95, std=0.05),
+        type="ConcatDataset",
+        datasets=[
             dict(
-                type="GridSample",
-                grid_size=0.002,
-                hash_type="fnv",
-                mode="train",
-                return_grid_coord=True,
+                type=dataset_type,
+                split="train",
+                data_root=data_root,
+                transform=[
+                    dict(type="CenterShift", apply_z=True),
+                    dict(type="MapLabel", mapping_dict=mapping_dict),
+                    dict(type="RandomDropout", dropout_ratio=0.1, dropout_application_ratio=0.2),
+                    dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
+                    dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="x", p=0.5),
+                    dict(type="RandomRotate", angle=[-1 / 128, 1 / 128], axis="y", p=0.5),
+                    dict(type="RandomScale", scale=[0.95, 1.05]),
+                    # dict(type="RandomFlip", p=0.5), # 禁用翻转以保护相机射线和物体手性
+                    dict(type="RandomJitter", sigma=0.0005, clip=0.0015),
+                    # dict(type="ElasticDistortion", distortion_params=[[0.05, 0.1], [0.2, 0.4]]),
+                    dict(type="ChromaticAutoContrast", p=0.2, blend_factor=None),
+                    dict(type="ChromaticTranslation", p=0.95, ratio=0.05),
+                    dict(type="ChromaticJitter", p=0.95, std=0.05),
+                    dict(
+                        type="GridSample",
+                        grid_size=0.002,
+                                hash_type="fnv",
+                                mode="train",
+                                return_grid_coord=True,
+                            ),
+                    dict(type="SphereCrop", point_max=204800, mode="random"),
+                    dict(type="CenterShift", apply_z=False),
+                    dict(type="NormalizeColor"),
+                    dict(type="RandomDropNormal", drop_ratio=1.0, drop_application_ratio=1.0), # Drop normal (no ray)
+                    dict(type="Update", keys_dict={"condition": "BOPAsk"}),
+                    dict(type="ToTensor"),
+                    dict(
+                        type="Collect",
+                        keys=("coord", "grid_coord", "segment", "condition"),
+                        feat_keys=("coord", "color", "normal"),
+                    ),
+                ],
+                test_mode=False,
+                loop=1,
             ),
-            dict(type="SphereCrop", point_max=204800, mode="random"),
-            dict(type="CenterShift", apply_z=False),
-            dict(type="NormalizeColor"),
-            dict(type="Update", keys_dict={"condition": "BOPAsk"}),
-            dict(type="ToTensor"),
-            dict(
-                type="Collect",
-                keys=("coord", "grid_coord", "segment", "condition"),
-                feat_keys=("coord", "color", "normal"),
-            ),
-        ],
-        test_mode=False,
-        loop=1,
+        ]
     ),
     val=dict(
         type=dataset_type,
@@ -151,7 +165,7 @@ data = dict(
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
-            dict(type="MapLabel", mapping_dict={41: 0}),
+            dict(type="MapLabel", mapping_dict=mapping_dict),
             dict(type="Copy", keys_dict={"segment": "origin_segment"}),
             dict(
                 type="GridSample",
@@ -163,7 +177,7 @@ data = dict(
             ),
             dict(type="CenterShift", apply_z=False),
             dict(type="NormalizeColor"),
-            # KEEP NORMAL
+            dict(type="RandomDropNormal", drop_ratio=1.0, drop_application_ratio=1.0), # Drop normal (no ray)
             dict(type="Update", keys_dict={"condition": "BOPAsk"}),
             dict(type="ToTensor"),
             dict(
@@ -180,9 +194,9 @@ data = dict(
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
-            dict(type="MapLabel", mapping_dict={41: 0}),
+            dict(type="MapLabel", mapping_dict=mapping_dict),
             dict(type="NormalizeColor"),
-            # KEEP NORMAL
+            dict(type="RandomDropNormal", drop_ratio=1.0, drop_application_ratio=1.0), # Drop normal (no ray)
         ],
         test_mode=True,
         test_cfg=dict(

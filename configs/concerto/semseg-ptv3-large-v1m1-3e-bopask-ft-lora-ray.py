@@ -144,10 +144,11 @@ data = dict(
     ),
     test=dict(
         type=dataset_type,
-        split="test",
+        split="val",
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
+            dict(type="MapLabel", mapping_dict={41: 0}),
             dict(type="NormalizeColor"),
         ],
         test_mode=True,
