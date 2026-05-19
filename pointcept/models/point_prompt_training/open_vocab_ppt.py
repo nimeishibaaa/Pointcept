@@ -30,13 +30,13 @@ class OpenVocabPPT(nn.Module):
             for p in self.backbone.parameters():
                 p.requires_grad = False
                 
-        import clip
         clip_model, _ = clip.load(clip_model, device="cpu", download_root="./.cache/clip")
         clip_model.requires_grad_(False)
         self.clip_model = clip_model
         
         self.proj_head = nn.Linear(backbone_out_channels, clip_model.text_projection.shape[1])
-        self.logit_scale = clip_model.logit_scale
+        self.logit_scale = nn.Parameter(clip_model.logit_scale.clone().detach())
+        self.logit_scale.requires_grad_(False)
 
     def forward(self, data_dict):
         if self.freeze_backbone:
@@ -61,21 +61,36 @@ class OpenVocabPPT(nn.Module):
         texts = data_dict["texts"]
         
         device = feat.device
-        prompts = [self.template.replace("[x]", t) for t in texts]
         
-        import clip
-        text_tokens = clip.tokenize(prompts).to(device)
-        
-        # Ensure clip_model is on the correct device
-        if next(self.clip_model.parameters()).device != device:
-            self.clip_model = self.clip_model.to(device)
+        if isinstance(texts[0], (list, tuple)):
+            # Handle batch of texts: list of lists of strings
+            batch_size = len(texts)
+            prompts = []
+            for t_list in texts:
+                prompts.extend([self.template.replace("[x]", t) for t in t_list])
+            text_tokens = clip.tokenize(prompts).to(device)
             
-        with torch.no_grad():
-            text_features = self.clip_model.encode_text(text_tokens)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            with torch.no_grad():
+                text_features = self.clip_model.encode_text(text_tokens)
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                
+            num_texts = len(texts[0])
+            text_features = text_features.view(batch_size, num_texts, -1)
             
-        # sim shape: [N_points, Num_texts]
-        sim = feat @ text_features.t()
+            from pointcept.models.utils import offset2batch
+            batch_idx = offset2batch(data_dict["offset"])
+            sim = (feat.unsqueeze(1) * text_features[batch_idx]).sum(dim=-1)
+        else:
+            # Handle single list of strings
+            prompts = [self.template.replace("[x]", t) for t in texts]
+            text_tokens = clip.tokenize(prompts).to(device)
+            
+            with torch.no_grad():
+                text_features = self.clip_model.encode_text(text_tokens)
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                
+            sim = feat @ text_features.t()
+            
         logit_scale = self.logit_scale.exp()
         seg_logits = logit_scale * sim
         

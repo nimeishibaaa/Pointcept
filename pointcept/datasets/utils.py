@@ -30,6 +30,8 @@ def collate_fn(batch):
         # str is also a kind of Sequence, judgement should before Sequence
         return list(batch)
     elif isinstance(batch[0], list):
+        if len(batch[0]) > 0 and isinstance(batch[0][0], str):
+            return list(batch)
         batch = [torch.tensor(data) for data in batch]
         return torch.cat(batch)
     elif isinstance(batch[0], Sequence):

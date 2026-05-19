@@ -787,6 +787,110 @@ class ShapeNetPartSegEvaluator(HookBase):
 
 
 @HOOKS.register_module()
+class OpenVocabEvaluator(HookBase):
+    def before_train(self):
+        if self.trainer.writer is not None and self.trainer.cfg.enable_wandb:
+            import wandb
+            wandb.define_metric("val/*", step_metric="Epoch")
+
+    def after_epoch(self):
+        if self.trainer.cfg.evaluate:
+            self.eval()
+
+    def eval(self):
+        self.trainer.logger.info(">>>>>>>>>>>>>>>> Start OpenVocab Evaluation >>>>>>>>>>>>>>>>")
+        self.trainer.model.eval()
+        for i, input_dict in enumerate(self.trainer.val_loader):
+            for key in input_dict.keys():
+                if isinstance(input_dict[key], torch.Tensor):
+                    input_dict[key] = input_dict[key].cuda(non_blocking=True)
+            with torch.no_grad():
+                output_dict = self.trainer.model(input_dict)
+            output = output_dict["seg_logits"]
+            loss = output_dict["loss"]
+            
+            # output shape: [N, Num_texts]
+            pred = (output > 0).float()
+            segment = input_dict["segment"].float()
+            
+            if "inverse" in input_dict.keys():
+                assert "origin_segment" in input_dict.keys()
+                pred = pred[input_dict["inverse"]]
+                segment = input_dict["origin_segment"].float()
+                
+            intersection = (pred * segment).sum(dim=0)
+            union = ((pred + segment) > 0).float().sum(dim=0)
+            target = segment.sum(dim=0)
+            
+            if comm.get_world_size() > 1:
+                dist.all_reduce(intersection)
+                dist.all_reduce(union)
+                dist.all_reduce(target)
+                
+            intersection, union, target = (
+                intersection.cpu().numpy(),
+                union.cpu().numpy(),
+                target.cpu().numpy(),
+            )
+            
+            # Aggregate per batch
+            self.trainer.storage.put_scalar("val_intersection", intersection.sum())
+            self.trainer.storage.put_scalar("val_union", union.sum())
+            self.trainer.storage.put_scalar("val_target", target.sum())
+            self.trainer.storage.put_scalar("val_loss", loss.item())
+            info = "Test: [{iter}/{max_iter}] ".format(
+                iter=i + 1, max_iter=len(self.trainer.val_loader)
+            )
+            if "origin_coord" in input_dict.keys():
+                info = "Interp. " + info
+            self.trainer.logger.info(
+                info
+                + "Loss {loss:.4f} ".format(
+                    iter=i + 1, max_iter=len(self.trainer.val_loader), loss=loss.item()
+                )
+            )
+        
+        loss_avg = self.trainer.storage.history("val_loss").avg
+        intersection_total = self.trainer.storage.history("val_intersection").total
+        union_total = self.trainer.storage.history("val_union").total
+        target_total = self.trainer.storage.history("val_target").total
+        
+        m_iou = intersection_total / (union_total + 1e-10)
+        m_acc = intersection_total / (target_total + 1e-10)
+        
+        self.trainer.logger.info(
+            "Val result: Global IoU/Acc {:.4f}/{:.4f}.".format(
+                m_iou, m_acc
+            )
+        )
+        
+        current_epoch = self.trainer.epoch + 1
+        if self.trainer.writer is not None:
+            self.trainer.writer.add_scalar("val/loss", loss_avg, current_epoch)
+            self.trainer.writer.add_scalar("val/mIoU", m_iou, current_epoch)
+            self.trainer.writer.add_scalar("val/mAcc", m_acc, current_epoch)
+            if self.trainer.cfg.enable_wandb:
+                import wandb
+                wandb.log(
+                    {
+                        "Epoch": current_epoch,
+                        "val/loss": loss_avg,
+                        "val/mIoU": m_iou,
+                        "val/mAcc": m_acc,
+                    },
+                    step=wandb.run.step,
+                )
+        self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
+        self.trainer.comm_info["current_metric_value"] = m_iou  # save for saver
+        self.trainer.comm_info["current_metric_name"] = "mIoU"  # save for saver
+
+    def after_train(self):
+        self.trainer.logger.info(
+            "Best {}: {:.4f}".format("mIoU", self.trainer.best_metric_value)
+        )
+
+
+@HOOKS.register_module()
 class PartNetEPartSegEvaluator(HookBase):
     def __init__(self, num_parts=None, write_part_iou=False):
         self.num_parts = sum(num_parts)
