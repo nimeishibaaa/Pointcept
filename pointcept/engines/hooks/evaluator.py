@@ -788,6 +788,12 @@ class ShapeNetPartSegEvaluator(HookBase):
 
 @HOOKS.register_module()
 class OpenVocabEvaluator(HookBase):
+    """
+    per-query IoU + mAP evaluator for open-vocabulary binary retrieval.
+    Primary metric: mAP (mean Average Precision over text queries).
+    Secondary metric: per-query IoU at sigmoid > 0.5 threshold.
+    """
+
     def before_train(self):
         if self.trainer.writer is not None and self.trainer.cfg.enable_wandb:
             import wandb
@@ -798,95 +804,122 @@ class OpenVocabEvaluator(HookBase):
             self.eval()
 
     def eval(self):
+        import numpy as np
+        from sklearn.metrics import average_precision_score
+
         self.trainer.logger.info(">>>>>>>>>>>>>>>> Start OpenVocab Evaluation >>>>>>>>>>>>>>>>")
         self.trainer.model.eval()
+
+        # 用于 mAP：累积每个 query 的 pred scores 和 ground truth
+        all_scores = []   # List of [N_i, Num_texts] numpy arrays
+        all_targets = []  # List of [N_i, Num_texts] numpy arrays
+        # 用于 per-query IoU：累积 intersection / union
+        total_intersection = None  # [Num_texts]
+        total_union = None         # [Num_texts]
+        total_loss = 0.0
+        num_batches = 0
+
         for i, input_dict in enumerate(self.trainer.val_loader):
             for key in input_dict.keys():
                 if isinstance(input_dict[key], torch.Tensor):
                     input_dict[key] = input_dict[key].cuda(non_blocking=True)
+
             with torch.no_grad():
                 output_dict = self.trainer.model(input_dict)
-            output = output_dict["seg_logits"]
+
+            seg_logits = output_dict["seg_logits"]  # [N, Num_texts]
             loss = output_dict["loss"]
-            
-            # output shape: [N, Num_texts]
-            pred = (output > 0).float()
-            segment = input_dict["segment"].float()
-            
+            segment = input_dict["segment"].float()  # [N, Num_texts]
+
+            # 处理插值（GridSample inverse）
             if "inverse" in input_dict.keys():
                 assert "origin_segment" in input_dict.keys()
-                pred = pred[input_dict["inverse"]]
+                seg_logits = seg_logits[input_dict["inverse"]]
                 segment = input_dict["origin_segment"].float()
-                
-            intersection = (pred * segment).sum(dim=0)
-            union = ((pred + segment) > 0).float().sum(dim=0)
-            target = segment.sum(dim=0)
-            
+
+            # sigmoid → pred prob
+            pred_prob = torch.sigmoid(seg_logits)  # [N, Num_texts]
+
+            # per-query IoU at threshold 0.5
+            pred_bin = (pred_prob > 0.5).float()
+            intersection = (pred_bin * segment).sum(dim=0)   # [Num_texts]
+            union = ((pred_bin + segment) > 0).float().sum(dim=0)  # [Num_texts]
+
             if comm.get_world_size() > 1:
                 dist.all_reduce(intersection)
                 dist.all_reduce(union)
-                dist.all_reduce(target)
-                
-            intersection, union, target = (
-                intersection.cpu().numpy(),
-                union.cpu().numpy(),
-                target.cpu().numpy(),
+
+            intersection = intersection.cpu().numpy()
+            union = union.cpu().numpy()
+
+            if total_intersection is None:
+                total_intersection = intersection
+                total_union = union
+            else:
+                total_intersection += intersection
+                total_union += union
+
+            # 存储 scores/targets 用于 AP 计算（只在 rank 0 累积，避免重复）
+            if comm.get_local_rank() == 0:
+                all_scores.append(pred_prob.cpu().numpy())
+                all_targets.append(segment.cpu().numpy())
+
+            total_loss += loss.item()
+            num_batches += 1
+
+            info = "Test: [{iter}/{max_iter}] Loss {loss:.4f}".format(
+                iter=i + 1, max_iter=len(self.trainer.val_loader), loss=loss.item()
             )
-            
-            # Aggregate per batch
-            self.trainer.storage.put_scalar("val_intersection", intersection.sum())
-            self.trainer.storage.put_scalar("val_union", union.sum())
-            self.trainer.storage.put_scalar("val_target", target.sum())
-            self.trainer.storage.put_scalar("val_loss", loss.item())
-            info = "Test: [{iter}/{max_iter}] ".format(
-                iter=i + 1, max_iter=len(self.trainer.val_loader)
-            )
-            if "origin_coord" in input_dict.keys():
-                info = "Interp. " + info
-            self.trainer.logger.info(
-                info
-                + "Loss {loss:.4f} ".format(
-                    iter=i + 1, max_iter=len(self.trainer.val_loader), loss=loss.item()
-                )
-            )
-        
-        loss_avg = self.trainer.storage.history("val_loss").avg
-        intersection_total = self.trainer.storage.history("val_intersection").total
-        union_total = self.trainer.storage.history("val_union").total
-        target_total = self.trainer.storage.history("val_target").total
-        
-        m_iou = intersection_total / (union_total + 1e-10)
-        m_acc = intersection_total / (target_total + 1e-10)
-        
+            self.trainer.logger.info(info)
+
+        # ── 计算指标 ──
+        per_query_iou = total_intersection / (total_union + 1e-10)  # [Num_texts]
+        mean_iou = float(np.mean(per_query_iou))
+        loss_avg = total_loss / max(num_batches, 1)
+
+        # mAP（只在 rank 0 计算）
+        mean_ap = 0.0
+        if comm.get_local_rank() == 0 and len(all_scores) > 0:
+            scores_all = np.concatenate(all_scores, axis=0)   # [N_total, Num_texts]
+            targets_all = np.concatenate(all_targets, axis=0) # [N_total, Num_texts]
+            num_queries = scores_all.shape[1]
+            ap_per_query = []
+            for q in range(num_queries):
+                if targets_all[:, q].sum() > 0:  # 跳过该 query 无正样本的情况
+                    ap = average_precision_score(targets_all[:, q], scores_all[:, q])
+                    ap_per_query.append(ap)
+            mean_ap = float(np.mean(ap_per_query)) if ap_per_query else 0.0
+
         self.trainer.logger.info(
-            "Val result: Global IoU/Acc {:.4f}/{:.4f}.".format(
-                m_iou, m_acc
+            "Val result: mAP {:.4f} | mean_IoU {:.4f} | Loss {:.4f}".format(
+                mean_ap, mean_iou, loss_avg
             )
         )
-        
+        for q_idx, iou_val in enumerate(per_query_iou):
+            self.trainer.logger.info(
+                "  Query {:02d}: IoU {:.4f}".format(q_idx, iou_val)
+            )
+
         current_epoch = self.trainer.epoch + 1
         if self.trainer.writer is not None:
+            self.trainer.writer.add_scalar("val/mAP", mean_ap, current_epoch)
+            self.trainer.writer.add_scalar("val/mean_IoU", mean_iou, current_epoch)
             self.trainer.writer.add_scalar("val/loss", loss_avg, current_epoch)
-            self.trainer.writer.add_scalar("val/mIoU", m_iou, current_epoch)
-            self.trainer.writer.add_scalar("val/mAcc", m_acc, current_epoch)
             if self.trainer.cfg.enable_wandb:
                 import wandb
                 wandb.log(
-                    {
-                        "Epoch": current_epoch,
-                        "val/loss": loss_avg,
-                        "val/mIoU": m_iou,
-                        "val/mAcc": m_acc,
-                    },
+                    {"Epoch": current_epoch, "val/mAP": mean_ap,
+                     "val/mean_IoU": mean_iou, "val/loss": loss_avg},
                     step=wandb.run.step,
                 )
+
         self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
-        self.trainer.comm_info["current_metric_value"] = m_iou  # save for saver
-        self.trainer.comm_info["current_metric_name"] = "mIoU"  # save for saver
+        self.trainer.comm_info["current_metric_value"] = mean_ap  # checkpoint 依据
+        self.trainer.comm_info["current_metric_name"] = "mAP"
 
     def after_train(self):
         self.trainer.logger.info(
-            "Best {}: {:.4f}".format("mIoU", self.trainer.best_metric_value)
+            "Best {}: {:.4f}".format("mAP", self.trainer.best_metric_value)
         )
 
 

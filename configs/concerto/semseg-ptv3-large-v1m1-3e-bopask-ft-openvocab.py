@@ -74,7 +74,8 @@ scheduler = dict(
 param_dicts = [dict(keyword="block", lr=0.0002)]
 
 # dataset settings
-dataset_type = "HandalDataset"
+# dataset_type = "HandalDataset"
+dataset_type = "BopaskOpenVocabDataset" 
 data_root = "data/concerto/bopask"
 
 # NOTE ON DATASET MODIFICATION:

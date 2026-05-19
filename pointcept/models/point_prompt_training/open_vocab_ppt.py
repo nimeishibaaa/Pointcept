@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import clip
 from pointcept.models.builder import MODELS
 from pointcept.models.losses import build_criteria
 
