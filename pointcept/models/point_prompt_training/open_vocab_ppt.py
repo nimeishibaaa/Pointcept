@@ -36,8 +36,9 @@ class OpenVocabPPT(nn.Module):
         self.clip_model = clip_model
         
         self.proj_head = nn.Linear(backbone_out_channels, clip_model.text_projection.shape[1])
+        # TODO: 映射从单层Linear升级到MLP
         self.logit_scale = nn.Parameter(clip_model.logit_scale.clone().detach())
-        self.logit_scale.requires_grad_(False)
+        # self.logit_scale.requires_grad_(False)
 
     def forward(self, data_dict):
         if self.freeze_backbone:
@@ -46,11 +47,11 @@ class OpenVocabPPT(nn.Module):
         else:
             point = self.backbone(data_dict)
             
-        while "pooling_parent" in point.keys():
-            parent = point.pop("pooling_parent")
-            inverse = point.pop("pooling_inverse")
-            parent.feat = torch.cat([parent.feat, point.feat[inverse]], dim=-1)
-            point = parent
+        # while "pooling_parent" in point.keys():
+        #     parent = point.pop("pooling_parent")
+        #     inverse = point.pop("pooling_inverse")
+        #     parent.feat = torch.cat([parent.feat, point.feat[inverse]], dim=-1)
+        #     point = parent
             
         feat = self.proj_head(point.feat)
         eps = 1e-6 if feat.dtype == torch.float16 else 1e-12
