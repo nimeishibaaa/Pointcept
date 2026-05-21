@@ -837,13 +837,21 @@ class OpenVocabEvaluator(HookBase):
                 seg_logits = seg_logits[input_dict["inverse"]]
                 segment = input_dict["origin_segment"].float()
 
+            # Create a valid mask to ignore -1 background points in evaluation
+            valid_mask = (segment != -1)
+
             # sigmoid → pred prob
             pred_prob = torch.sigmoid(seg_logits)  # [N, Num_texts]
 
-            # per-query IoU at threshold 0.5
+            # per-query IoU at threshold 0.5 (only on valid points)
             pred_bin = (pred_prob > 0.5).float()
-            intersection = (pred_bin * segment).sum(dim=0)   # [Num_texts]
-            union = ((pred_bin + segment) > 0).float().sum(dim=0)  # [Num_texts]
+            
+            # Apply valid mask (set invalid points to 0 for intersection/union math)
+            segment_valid = torch.where(valid_mask, segment, torch.zeros_like(segment))
+            pred_bin_valid = torch.where(valid_mask, pred_bin, torch.zeros_like(pred_bin))
+
+            intersection = (pred_bin_valid * segment_valid).sum(dim=0)   # [Num_texts]
+            union = ((pred_bin_valid + segment_valid) > 0).float().sum(dim=0)  # [Num_texts]
 
             if comm.get_world_size() > 1:
                 dist.all_reduce(intersection)
@@ -861,6 +869,7 @@ class OpenVocabEvaluator(HookBase):
 
             # 存储 scores/targets 用于 AP 计算（只在 rank 0 累积，避免重复）
             if comm.get_local_rank() == 0:
+                # We need to store masks as well to filter them later for mAP
                 all_scores.append(pred_prob.cpu().numpy())
                 all_targets.append(segment.cpu().numpy())
 
@@ -885,8 +894,11 @@ class OpenVocabEvaluator(HookBase):
             num_queries = scores_all.shape[1]
             ap_per_query = []
             for q in range(num_queries):
-                if targets_all[:, q].sum() > 0:  # 跳过该 query 无正样本的情况
-                    ap = average_precision_score(targets_all[:, q], scores_all[:, q])
+                valid_mask = targets_all[:, q] != -1
+                valid_targets = targets_all[valid_mask, q]
+                valid_scores = scores_all[valid_mask, q]
+                if valid_targets.sum() > 0:  # 跳过该 query 无正样本的情况
+                    ap = average_precision_score(valid_targets, valid_scores)
                     ap_per_query.append(ap)
             mean_ap = float(np.mean(ap_per_query)) if ap_per_query else 0.0
 

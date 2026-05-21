@@ -167,8 +167,14 @@ class BopaskOpenVocabDataset(BopaskDataset):
         seg_int = data_dict["segment"].reshape(-1).astype(np.int32)
         num_texts = len(texts)
         binary_mask = np.zeros((len(seg_int), num_texts), dtype=np.float32)
+        # Note: raw object IDs are mapped to 1, 2, ... in preprocessing.
+        # texts[0] corresponds to object 1 (seg_int == 1).
         for i in range(num_texts):
-            binary_mask[:, i] = (seg_int == i).astype(np.float32)
+            binary_mask[:, i] = (seg_int == i + 1).astype(np.float32)
+        
+        # If a point is background (seg_int == 0), it will have all 0s in binary_mask.
+        # We can explicitly set these to -1 if we want to ignore them.
+
 
         # ── 可选 padding 到固定 T_max ─────────────────────────
         if self.pad_num_texts is not None:

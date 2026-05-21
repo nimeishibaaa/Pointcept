@@ -71,15 +71,17 @@ class BinaryFocalLoss(nn.Module):
         self.loss_weight = loss_weight
 
     def forward(self, pred, target, **kwargs):
-        """Forward function.
-        Args:
-            pred (torch.Tensor): The prediction with shape (N)
-            target (torch.Tensor): The ground truth. If containing class
-                indices, shape (N) where each value is 0≤targets[i]≤1, If containing class probabilities,
-                same shape as the input.
-        Returns:
-            torch.Tensor: The calculated loss
-        """
+        """Forward function."""
+        # ignore_index support for open-vocab PPT
+        valid_mask = (target != -1)
+        
+        # If no valid points, return 0 loss
+        if not valid_mask.any():
+            return pred.sum() * 0.0
+
+        pred = pred[valid_mask]
+        target = target[valid_mask]
+
         if self.logits:
             bce = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
         else:
