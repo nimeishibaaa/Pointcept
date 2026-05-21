@@ -1,20 +1,6 @@
 _base_ = ["../_base_/default_runtime.py"]
 
-from pointcept.datasets.builder import TRANSFORMS
 
-@TRANSFORMS.register_module()
-class MapBackgroundToIgnore(object):
-    """
-    Background points have all 0s in the open-vocab binary mask.
-    Map them to -1 (ignore_index) so the loss function ignores them.
-    """
-    def __call__(self, data_dict):
-        if "segment" in data_dict:
-            mask = data_dict["segment"]
-            bg_idx = (mask.sum(axis=-1) == 0)
-            mask[bg_idx] = -1
-            data_dict["segment"] = mask
-        return data_dict
 
 # disable wandb
 enable_wandb = False
@@ -112,7 +98,7 @@ data = dict(
                 data_root=data_root,
                 transform=[
                     dict(type="CenterShift", apply_z=True),
-                    dict(type="MapBackgroundToIgnore"),
+                    # dict(type="MapBackgroundToIgnore"),
                     # dict(type="MapLabel", mapping_dict=mapping_dict), # REMOVED closed-set mapping
                     dict(type="RandomDropout", dropout_ratio=0.1, dropout_application_ratio=0.2),
                     dict(type="RandomRotate", angle=[-1, 1], axis="z", center=[0, 0, 0], p=0.5),
@@ -152,7 +138,7 @@ data = dict(
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
-            dict(type="MapBackgroundToIgnore"),
+            # dict(type="MapBackgroundToIgnore"),
             # dict(type="MapLabel", mapping_dict=mapping_dict),
             dict(type="Copy", keys_dict={"segment": "origin_segment"}),
             dict(
@@ -180,7 +166,7 @@ data = dict(
         data_root=data_root,
         transform=[
             dict(type="CenterShift", apply_z=True),
-            dict(type="MapBackgroundToIgnore"),
+            # dict(type="MapBackgroundToIgnore"),
             dict(type="NormalizeColor"),
         ],
         test_mode=True,
