@@ -32,6 +32,7 @@ class OpenVocabPPT(nn.Module):
                 p.requires_grad = False
                 
         clip_model, _ = clip.load(clip_model, device="cpu", download_root="./.cache/clip")
+        clip_model = clip_model.float() # 强制转换为 float32 防止 AMP 崩溃
         clip_model.requires_grad_(False)
         self.clip_model = clip_model
         
@@ -73,9 +74,11 @@ class OpenVocabPPT(nn.Module):
             text_tokens = clip.tokenize(prompts).to(device)
             
             with torch.no_grad():
-                text_features = self.clip_model.encode_text(text_tokens)
-                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                
+                with torch.autocast(device_type="cuda", enabled=False):
+                    text_features = self.clip_model.encode_text(text_tokens)
+                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                text_features = text_features.to(feat.dtype)
+            
             num_texts = len(texts[0])
             text_features = text_features.view(batch_size, num_texts, -1)
             
@@ -88,8 +91,10 @@ class OpenVocabPPT(nn.Module):
             text_tokens = clip.tokenize(prompts).to(device)
             
             with torch.no_grad():
-                text_features = self.clip_model.encode_text(text_tokens)
-                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                with torch.autocast(device_type="cuda", enabled=False):
+                    text_features = self.clip_model.encode_text(text_tokens)
+                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                text_features = text_features.to(feat.dtype)
                 
             sim = feat @ text_features.t()
             

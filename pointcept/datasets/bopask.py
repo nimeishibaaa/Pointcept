@@ -172,8 +172,9 @@ class BopaskOpenVocabDataset(BopaskDataset):
         for i in range(num_texts):
             binary_mask[:, i] = (seg_int == i + 1).astype(np.float32)
         
-        # If a point is background (seg_int == 0), it will have all 0s in binary_mask.
-        # We can explicitly set these to -1 if we want to ignore them.
+        # We explicitly set background points (seg_int == 0) to -1 so they are ignored by the loss
+        bg_mask = (seg_int == 0)
+        binary_mask[bg_mask, :] = -1
 
 
         # ── 可选 padding 到固定 T_max ─────────────────────────
